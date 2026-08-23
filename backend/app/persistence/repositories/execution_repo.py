@@ -3,7 +3,12 @@
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from ...domain.models.execution import WorkflowExecution, TaskExecution
+from ...domain.models.execution import (
+    WorkflowExecution,
+    WorkflowExecutionStatus,
+    TaskExecution,
+    TaskExecutionStatus,
+)
 from ...domain.interfaces.repository import ExecutionRepository
 from ..models import WorkflowExecutionModel, TaskExecutionModel
 
@@ -65,3 +70,33 @@ class SqlExecutionRepository(ExecutionRepository):
 
         await self.session.flush()
         return model.to_domain()
+
+    async def claim_task_for_execution(
+        self, workflow_execution_id: str, task_key: str
+    ) -> Optional[TaskExecution]:
+        """
+        Atomically claims a READY task for execution using database row-level locking (SELECT FOR UPDATE).
+        Guarantees that exactly one worker can acquire and transition the task to RUNNING.
+        """
+        stmt = (
+            select(TaskExecutionModel)
+            .where(
+                TaskExecutionModel.workflow_execution_id == workflow_execution_id,
+                TaskExecutionModel.task_key == task_key,
+                TaskExecutionModel.status == TaskExecutionStatus.READY.value,
+            )
+            .with_for_update()
+        )
+        result = await self.session.execute(stmt)
+        model = result.scalar_one_or_none()
+        if not model:
+            return None
+
+        from datetime import datetime
+        model.status = TaskExecutionStatus.RUNNING.value
+        model.attempt_count += 1
+        model.started_at = datetime.utcnow()
+
+        await self.session.flush()
+        return model.to_domain()
+
