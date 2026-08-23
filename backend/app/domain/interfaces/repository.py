@@ -35,6 +35,12 @@ class ExecutionRepository(Protocol):
     async def update_task_execution(self, task_exec: TaskExecution) -> TaskExecution:
         ...
 
+    async def claim_task_for_execution(
+        self, workflow_execution_id: str, task_key: str
+    ) -> Optional[TaskExecution]:
+        """Atomically locks and claims a READY task for execution using row-level locking."""
+        ...
+
 
 class EventRepository(Protocol):
     """Protocol for appending and querying immutable workflow telemetry events."""
