@@ -35,6 +35,11 @@ class ExecutionRepository(Protocol):
     async def update_task_execution(self, task_exec: TaskExecution) -> TaskExecution:
         ...
 
+    async def get_workflow_execution_by_idempotency_key(
+        self, workflow_id: str, idempotency_key: str
+    ) -> Optional[WorkflowExecution]:
+        ...
+
     async def claim_task_for_execution(
         self, workflow_execution_id: str, task_key: str
     ) -> Optional[TaskExecution]:
