@@ -46,6 +46,23 @@ class SqlExecutionRepository(ExecutionRepository):
         model = result.scalar_one_or_none()
         return model.to_domain() if model else None
 
+    async def list_workflow_executions(
+        self,
+        workflow_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[WorkflowExecution]:
+        stmt = select(WorkflowExecutionModel)
+        if workflow_id:
+            stmt = stmt.where(WorkflowExecutionModel.workflow_id == workflow_id)
+        if status:
+            stmt = stmt.where(WorkflowExecutionModel.status == status)
+        stmt = stmt.order_by(WorkflowExecutionModel.created_at.desc()).limit(limit).offset(offset)
+        result = await self.session.execute(stmt)
+        models = result.scalars().all()
+        return [m.to_domain() for m in models]
+
     async def update_workflow_execution(self, execution: WorkflowExecution) -> WorkflowExecution:
         stmt = select(WorkflowExecutionModel).where(WorkflowExecutionModel.id == execution.id)
         result = await self.session.execute(stmt)

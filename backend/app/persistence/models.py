@@ -216,6 +216,7 @@ class WorkflowExecutionModel(Base):
             started_at=self.started_at,
             completed_at=self.completed_at,
             execution_duration_ms=self.execution_duration_ms,
+            created_at=self.created_at,
             tasks={t.task_key: t.to_domain() for t in self.task_executions},
         )
 
@@ -233,6 +234,7 @@ class WorkflowExecutionModel(Base):
             started_at=domain.started_at,
             completed_at=domain.completed_at,
             execution_duration_ms=domain.execution_duration_ms,
+            created_at=domain.created_at,
             task_executions=[TaskExecutionModel.from_domain(t) for t in domain.tasks.values()],
         )
 
