@@ -40,6 +40,15 @@ class ExecutionRepository(Protocol):
     ) -> Optional[WorkflowExecution]:
         ...
 
+    async def list_workflow_executions(
+        self,
+        workflow_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[WorkflowExecution]:
+        ...
+
     async def claim_task_for_execution(
         self, workflow_execution_id: str, task_key: str
     ) -> Optional[TaskExecution]:

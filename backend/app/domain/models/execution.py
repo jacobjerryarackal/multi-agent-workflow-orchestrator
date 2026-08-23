@@ -64,4 +64,5 @@ class WorkflowExecution(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     execution_duration_ms: Optional[int] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     tasks: Dict[str, TaskExecution] = Field(default_factory=dict)
