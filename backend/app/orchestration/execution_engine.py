@@ -1,0 +1,545 @@
+"""Production-grade multi-agent workflow execution engine."""
+
+import asyncio
+from datetime import datetime
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import structlog
+
+from ..core.exceptions import (
+    AgentNotFoundError,
+    OrchestratorException,
+    StateTransitionError,
+    WorkflowNotFoundError,
+    WorkflowValidationError,
+)
+from ..domain.interfaces.repository import (
+    ArtifactRepository,
+    EventRepository,
+    ExecutionRepository,
+    WorkflowRepository,
+)
+from ..domain.models.agent import AgentExecutionContext, AgentResult, ProducedArtifact
+from ..domain.models.artifact import Artifact, ArtifactType
+from ..domain.models.event import EventType, WorkflowEvent
+from ..domain.models.execution import (
+    TaskExecution,
+    TaskExecutionStatus,
+    WorkflowExecution,
+    WorkflowExecutionStatus,
+)
+from ..domain.models.workflow import TaskSpec, WorkflowSpec
+from ..agents.registry import AgentRegistry
+from .dependency_resolver import DependencyResolver
+from .state_machine import TaskCommand, WorkflowCommand, WorkflowStateMachine
+
+logger = structlog.get_logger(__name__)
+
+
+class WorkflowExecutionEngine:
+    """
+    Core orchestrator responsible for end-to-end multi-agent workflow execution:
+    - DAG task dependency resolution
+    - Atomic task locking and claiming
+    - Input mapping and artifact passing across tasks
+    - Agent registry discovery and bounded execution
+    - Failure handling, backoff retries, and failure propagation
+    - Append-only event auditing and terminal state finalization
+    """
+
+    def __init__(
+        self,
+        workflow_repo: WorkflowRepository,
+        execution_repo: ExecutionRepository,
+        event_repo: EventRepository,
+        artifact_repo: ArtifactRepository,
+        agent_registry: AgentRegistry,
+    ):
+        self.workflow_repo = workflow_repo
+        self.execution_repo = execution_repo
+        self.event_repo = event_repo
+        self.artifact_repo = artifact_repo
+        self.agent_registry = agent_registry
+        self._db_lock = asyncio.Lock()
+
+    async def submit_workflow(
+        self,
+        workflow_id: str,
+        initial_inputs: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+        trigger_type: str = "manual",
+    ) -> WorkflowExecution:
+        """
+        Submits and initializes a workflow execution record from a registered WorkflowSpec.
+        Validates the DAG structure, creates task execution placeholders, and persists the record.
+        """
+        async with self._db_lock:
+            workflow = await self.workflow_repo.get_workflow_spec(workflow_id)
+            if not workflow:
+                raise WorkflowNotFoundError(f"Workflow with ID '{workflow_id}' does not exist.")
+
+            # 1. Validate DAG graph topology
+            DependencyResolver.validate_workflow_graph(workflow)
+
+            # 2. Check idempotency if key is provided
+            if idempotency_key:
+                existing = await self.execution_repo.get_workflow_execution_by_idempotency_key(
+                    workflow_id, idempotency_key
+                )
+                if existing:
+                    logger.info(
+                        "Idempotent workflow execution reused",
+                        workflow_id=workflow_id,
+                        execution_id=existing.id,
+                        idempotency_key=idempotency_key,
+                    )
+                    return existing
+
+            # 3. Create WorkflowExecution domain entity
+            execution = WorkflowExecution(
+                workflow_id=workflow_id,
+                status=WorkflowExecutionStatus.QUEUED,
+                trigger_type=trigger_type,
+                idempotency_key=idempotency_key,
+                initial_inputs=initial_inputs,
+            )
+
+            # 4. Initialize task executions
+            for task_spec in workflow.tasks:
+                initial_task_status = (
+                    TaskExecutionStatus.READY
+                    if not task_spec.depends_on
+                    else TaskExecutionStatus.BLOCKED
+                )
+                task_exec = TaskExecution(
+                    workflow_execution_id=execution.id,
+                    task_key=task_spec.task_key,
+                    agent_id=task_spec.agent_id,
+                    status=initial_task_status,
+                    attempt_count=0,
+                )
+                execution.tasks[task_spec.task_key] = task_exec
+
+            # 5. Persist workflow execution
+            saved_execution = await self.execution_repo.create_workflow_execution(execution)
+
+        # 6. Audit event
+        await self._emit_event(
+            execution_id=saved_execution.id,
+            workflow_id=workflow_id,
+            event_type=EventType.WORKFLOW_STARTED,
+            payload={"initial_inputs": initial_inputs, "task_count": len(workflow.tasks)},
+        )
+
+        logger.info(
+            "Workflow execution submitted",
+            workflow_id=workflow_id,
+            execution_id=saved_execution.id,
+        )
+        return saved_execution
+
+    async def run_to_completion(
+        self,
+        execution_id: str,
+        max_poll_cycles: int = 100,
+        poll_interval_seconds: float = 0.01,
+    ) -> WorkflowExecution:
+        """
+        Drives the execution loop until the workflow reaches a terminal state
+        or pauses on a human approval / external gate.
+        """
+        async with self._db_lock:
+            execution = await self.execution_repo.get_workflow_execution(execution_id)
+            if not execution:
+                raise WorkflowNotFoundError(f"Execution '{execution_id}' not found.")
+
+            workflow = await self.workflow_repo.get_workflow_spec(execution.workflow_id)
+            if not workflow:
+                raise WorkflowNotFoundError(f"Workflow '{execution.workflow_id}' not found.")
+
+            # Transition workflow to RUNNING if still QUEUED
+            if execution.status == WorkflowExecutionStatus.QUEUED:
+                WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.START)
+                execution = await self.execution_repo.update_workflow_execution(execution)
+
+        task_spec_map = {t.task_key: t for t in workflow.tasks}
+
+        cycles = 0
+        start_time = time.perf_counter()
+
+        while cycles < max_poll_cycles:
+            cycles += 1
+            # If workflow entered terminal state or paused, break
+            if execution.status in (
+                WorkflowExecutionStatus.COMPLETED,
+                WorkflowExecutionStatus.FAILED,
+                WorkflowExecutionStatus.CANCELLED,
+                WorkflowExecutionStatus.TIMED_OUT,
+                WorkflowExecutionStatus.PAUSED,
+            ):
+                break
+
+            # 1. Update task statuses based on DAG dependency resolution
+            completed_keys = {
+                k for k, t in execution.tasks.items() if t.status == TaskExecutionStatus.COMPLETED
+            }
+            failed_keys = {
+                k for k, t in execution.tasks.items() if t.status in (TaskExecutionStatus.FAILED, TaskExecutionStatus.TIMED_OUT)
+            }
+
+            async with self._db_lock:
+                # Unblock blocked tasks whose dependencies are fully met
+                for task_key, task_exec in execution.tasks.items():
+                    if task_exec.status == TaskExecutionStatus.BLOCKED:
+                        spec = task_spec_map[task_key]
+                        if set(spec.depends_on).issubset(completed_keys):
+                            WorkflowStateMachine.transition_task(task_exec, TaskCommand.READY)
+                            await self.execution_repo.update_task_execution(task_exec)
+                        elif any(dep in failed_keys for dep in spec.depends_on):
+                            # Upstream failure cascade -> fail downstream task
+                            WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
+                            task_exec.error_details = {
+                                "reason": "Upstream prerequisite task failed unrecoverably.",
+                                "failed_dependencies": [dep for dep in spec.depends_on if dep in failed_keys],
+                            }
+                            await self.execution_repo.update_task_execution(task_exec)
+
+            # 2. Identify ready tasks to dispatch
+            ready_tasks = [
+                t for t in execution.tasks.values() if t.status == TaskExecutionStatus.READY
+            ]
+
+            if not ready_tasks:
+                # Check for active running tasks or waiting approval
+                running_tasks = [
+                    t for t in execution.tasks.values() if t.status == TaskExecutionStatus.RUNNING
+                ]
+                waiting_approval = [
+                    t for t in execution.tasks.values() if t.status == TaskExecutionStatus.WAITING_APPROVAL
+                ]
+
+                if not running_tasks and not waiting_approval:
+                    # No tasks can make progress. Finalize workflow.
+                    await self._finalize_workflow(execution, workflow)
+                    break
+
+                if waiting_approval and not running_tasks:
+                    # Workflow is paused waiting on human approval
+                    break
+
+                await asyncio.sleep(poll_interval_seconds)
+                continue
+
+            tasks_to_run = ready_tasks[: workflow.max_parallel_tasks]
+
+            # 3. Execute ready tasks concurrently
+            await asyncio.gather(
+                *[self._process_single_task(execution, task_spec_map[t.task_key]) for t in tasks_to_run]
+            )
+
+        total_duration_ms = int((time.perf_counter() - start_time) * 1000)
+        execution.execution_duration_ms = total_duration_ms
+
+        async with self._db_lock:
+            final_exec = await self.execution_repo.get_workflow_execution(execution_id)
+            return final_exec or execution
+
+    async def _process_single_task(
+        self,
+        execution: WorkflowExecution,
+        task_spec: TaskSpec,
+    ) -> None:
+        """
+        Executes a single task within the workflow execution:
+        - Atomic claim via SELECT FOR UPDATE
+        - Input mapping resolution from initial inputs + upstream outputs
+        - Agent discovery & invocation
+        - Output & artifact persistence
+        - State transition & retry handling
+        """
+        task_key = task_spec.task_key
+
+        # 1. Atomic claim (acquires row lock, sets status=RUNNING, increments attempt_count)
+        async with self._db_lock:
+            claimed_task = await self.execution_repo.claim_task_for_execution(
+                execution.id, task_key
+            )
+            if not claimed_task:
+                return
+
+            # Build input payload
+            input_payload = await self._resolve_task_inputs(execution, task_spec)
+            claimed_task.input_data = input_payload
+            await self.execution_repo.update_task_execution(claimed_task)
+            execution.tasks[task_key] = claimed_task
+
+        await self._emit_event(
+            execution_id=execution.id,
+            workflow_id=execution.workflow_id,
+            task_key=task_key,
+            agent_id=task_spec.agent_id,
+            event_type=EventType.TASK_STARTED,
+            payload={"attempt_count": claimed_task.attempt_count},
+        )
+
+        # 2. Resolve agent from registry
+        try:
+            agent = self.agent_registry.get(task_spec.agent_id)
+        except AgentNotFoundError as exc:
+            async with self._db_lock:
+                claimed_task.status = TaskExecutionStatus.FAILED
+                claimed_task.error_details = {"error": str(exc), "category": "agent_not_found"}
+                await self.execution_repo.update_task_execution(claimed_task)
+                execution.tasks[task_key] = claimed_task
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.TASK_FAILED,
+                payload={"error": str(exc)},
+            )
+            return
+
+        # 3. Construct bounded AgentExecutionContext
+        agent_context = AgentExecutionContext(
+            workflow_execution_id=execution.id,
+            workflow_id=execution.workflow_id,
+            task_key=task_key,
+            input_payload=input_payload,
+            timeout_seconds=task_spec.timeout_seconds,
+        )
+
+        # 4. Execute agent (non-blocking model I/O runs in parallel)
+        agent_result: AgentResult = await agent.execute(agent_context)
+
+        # 5. Handle execution result
+        if agent_result.success:
+            await self._handle_task_success(execution, claimed_task, task_spec, agent_result)
+        else:
+            await self._handle_task_failure(execution, claimed_task, task_spec, agent_result)
+
+    async def _handle_task_success(
+        self,
+        execution: WorkflowExecution,
+        task_exec: TaskExecution,
+        task_spec: TaskSpec,
+        result: AgentResult,
+    ) -> None:
+        """Handles successful agent output, artifact persistence, and approval gating."""
+        task_key = task_spec.task_key
+        task_exec.output_data = result.structured_data
+        task_exec.token_usage = result.token_metrics.model_dump()
+        task_exec.execution_duration_ms = result.execution_duration_ms
+        task_exec.completed_at = datetime.utcnow()
+
+        # Persist produced artifacts
+        for prod_artifact in result.artifacts:
+            artifact = Artifact(
+                workflow_execution_id=execution.id,
+                task_key=task_spec.task_key,
+                name=prod_artifact.name,
+                artifact_type=ArtifactType(prod_artifact.artifact_type),
+                content=prod_artifact.content_or_uri,
+                checksum_sha256=prod_artifact.checksum_sha256,
+                metadata=prod_artifact.metadata,
+            )
+            async with self._db_lock:
+                await self.artifact_repo.save_artifact(artifact)
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_spec.task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.ARTIFACT_PRODUCED,
+                payload={"artifact_name": artifact.name, "checksum": artifact.checksum_sha256},
+            )
+
+        # Check approval gate
+        if task_spec.approval_gate.required:
+            WorkflowStateMachine.transition_task(task_exec, TaskCommand.REQUIRE_APPROVAL)
+            async with self._db_lock:
+                await self.execution_repo.update_task_execution(task_exec)
+                execution.tasks[task_key] = task_exec
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_spec.task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.TASK_WAITING_APPROVAL,
+                payload={"approver_roles": task_spec.approval_gate.approver_roles},
+            )
+        else:
+            WorkflowStateMachine.transition_task(task_exec, TaskCommand.COMPLETE)
+            async with self._db_lock:
+                await self.execution_repo.update_task_execution(task_exec)
+                execution.tasks[task_key] = task_exec
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_spec.task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.TASK_COMPLETED,
+                payload={"output_keys": list(result.structured_data.keys())},
+            )
+
+    async def _handle_task_failure(
+        self,
+        execution: WorkflowExecution,
+        task_exec: TaskExecution,
+        task_spec: TaskSpec,
+        result: AgentResult,
+    ) -> None:
+        """Handles task failure, evaluates retry policy, or marks task terminally FAILED."""
+        task_key = task_spec.task_key
+        task_exec.error_details = {
+            "error_message": result.error_message,
+            "error_category": result.error_category,
+            "attempt": task_exec.attempt_count,
+        }
+        task_exec.execution_duration_ms = result.execution_duration_ms
+
+        retry_policy = task_spec.retry_policy
+        max_retries = max(0, retry_policy.max_attempts - 1)
+
+        # Check retry eligibility (attempt_count <= max_retries)
+        if task_exec.attempt_count <= max_retries:
+            try:
+                WorkflowStateMachine.transition_task(
+                    task_exec,
+                    TaskCommand.RETRY,
+                    max_retries=max_retries,
+                )
+                async with self._db_lock:
+                    await self.execution_repo.update_task_execution(task_exec)
+                    execution.tasks[task_key] = task_exec
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=execution.workflow_id,
+                    task_key=task_spec.task_key,
+                    agent_id=task_spec.agent_id,
+                    event_type=EventType.TASK_RETRIED,
+                    payload={
+                        "attempt": task_exec.attempt_count,
+                        "max_retries": max_retries,
+                        "error": result.error_message,
+                    },
+                )
+                return
+            except StateTransitionError:
+                pass
+
+        # Retries exhausted or non-retryable -> mark FAILED
+        WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
+        task_exec.completed_at = datetime.utcnow()
+        async with self._db_lock:
+            await self.execution_repo.update_task_execution(task_exec)
+            execution.tasks[task_key] = task_exec
+        await self._emit_event(
+            execution_id=execution.id,
+            workflow_id=execution.workflow_id,
+            task_key=task_spec.task_key,
+            agent_id=task_spec.agent_id,
+            event_type=EventType.TASK_FAILED,
+            payload={"error": result.error_message, "attempts": task_exec.attempt_count},
+        )
+
+    async def _resolve_task_inputs(
+        self,
+        execution: WorkflowExecution,
+        task_spec: TaskSpec,
+    ) -> Dict[str, Any]:
+        """
+        Builds the input dictionary for a task by combining:
+        1. Static inputs defined on TaskSpec
+        2. Global initial workflow inputs
+        3. Upstream task output mappings defined in input_mappings
+        """
+        resolved: Dict[str, Any] = {}
+        resolved.update(task_spec.static_inputs)
+
+        # Merge matching workflow initial inputs
+        for k, v in execution.initial_inputs.items():
+            if k not in resolved:
+                resolved[k] = v
+
+        # Map upstream outputs: e.g. {"research_findings": "research_task.findings"}
+        for target_key, source_expr in task_spec.input_mappings.items():
+            if "." in source_expr:
+                src_task, src_field = source_expr.split(".", 1)
+                if src_task in execution.tasks:
+                    upstream_output = execution.tasks[src_task].output_data
+                    if src_field in upstream_output:
+                        resolved[target_key] = upstream_output[src_field]
+            else:
+                # Direct task key reference
+                if source_expr in execution.tasks:
+                    resolved[target_key] = execution.tasks[source_expr].output_data
+
+        return resolved
+
+    async def _finalize_workflow(
+        self,
+        execution: WorkflowExecution,
+        workflow: WorkflowSpec,
+    ) -> None:
+        """Determines terminal workflow state (COMPLETED or FAILED) and computes final outputs."""
+        all_tasks = execution.tasks.values()
+        is_all_completed = all(t.status == TaskExecutionStatus.COMPLETED for t in all_tasks)
+        has_any_failed = any(t.status in (TaskExecutionStatus.FAILED, TaskExecutionStatus.TIMED_OUT) for t in all_tasks)
+
+        if is_all_completed:
+            WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.COMPLETE)
+            execution.completed_at = datetime.utcnow()
+            
+            # Aggregate final outputs from leaf nodes
+            final_outputs: Dict[str, Any] = {}
+            for t in all_tasks:
+                final_outputs[t.task_key] = t.output_data
+            execution.final_outputs = final_outputs
+
+            async with self._db_lock:
+                await self.execution_repo.update_workflow_execution(execution)
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=workflow.id,
+                event_type=EventType.WORKFLOW_COMPLETED,
+                payload={"total_tasks": len(all_tasks)},
+            )
+            logger.info("Workflow execution completed successfully", execution_id=execution.id)
+        elif has_any_failed:
+            WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.FAIL)
+            execution.completed_at = datetime.utcnow()
+            execution.error_summary = "One or more critical tasks failed unrecoverably."
+            async with self._db_lock:
+                await self.execution_repo.update_workflow_execution(execution)
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=workflow.id,
+                event_type=EventType.WORKFLOW_FAILED,
+                payload={"error": execution.error_summary},
+            )
+            logger.warning("Workflow execution failed", execution_id=execution.id)
+
+    async def _emit_event(
+        self,
+        execution_id: str,
+        workflow_id: str,
+        event_type: EventType,
+        payload: Dict[str, Any],
+        task_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Appends an immutable telemetry event to the EventRepository."""
+        event = WorkflowEvent(
+            workflow_execution_id=execution_id,
+            workflow_id=workflow_id,
+            task_key=task_key,
+            agent_id=agent_id,
+            event_type=event_type,
+            payload=payload,
+            actor="orchestration_engine",
+        )
+        async with self._db_lock:
+            await self.event_repo.append_event(event)
