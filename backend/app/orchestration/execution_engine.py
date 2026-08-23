@@ -1,4 +1,4 @@
-"""Production-grade multi-agent workflow execution engine."""
+"""Production-grade multi-agent workflow execution engine with quality evaluation and bounded revision loops."""
 
 import asyncio
 from datetime import datetime
@@ -16,6 +16,7 @@ from ..core.exceptions import (
     WorkflowNotFoundError,
     WorkflowValidationError,
 )
+from ..domain.interfaces.evaluation_provider import EvaluationProvider
 from ..domain.interfaces.repository import (
     ArtifactRepository,
     EventRepository,
@@ -24,6 +25,12 @@ from ..domain.interfaces.repository import (
 )
 from ..domain.models.agent import AgentExecutionContext, AgentResult, ProducedArtifact
 from ..domain.models.artifact import Artifact, ArtifactType
+from ..domain.models.evaluation import (
+    EvaluationRequest,
+    EvaluationResult,
+    EvaluationVerdict,
+    RevisionContext,
+)
 from ..domain.models.event import EventType, WorkflowEvent
 from ..domain.models.execution import (
     TaskExecution,
@@ -33,6 +40,7 @@ from ..domain.models.execution import (
 )
 from ..domain.models.workflow import TaskSpec, WorkflowSpec
 from ..agents.registry import AgentRegistry
+from ..evaluators.composite import CompositeQualityEvaluator
 from .dependency_resolver import DependencyResolver
 from .state_machine import TaskCommand, WorkflowCommand, WorkflowStateMachine
 
@@ -46,6 +54,8 @@ class WorkflowExecutionEngine:
     - Atomic task locking and claiming
     - Input mapping and artifact passing across tasks
     - Agent registry discovery and bounded execution
+    - Layered quality evaluation (Deterministic + Semantic LLM)
+    - Bounded optimization and revision cycles
     - Failure handling, backoff retries, and failure propagation
     - Append-only event auditing and terminal state finalization
     """
@@ -57,12 +67,14 @@ class WorkflowExecutionEngine:
         event_repo: EventRepository,
         artifact_repo: ArtifactRepository,
         agent_registry: AgentRegistry,
+        evaluator: Optional[EvaluationProvider] = None,
     ):
         self.workflow_repo = workflow_repo
         self.execution_repo = execution_repo
         self.event_repo = event_repo
         self.artifact_repo = artifact_repo
         self.agent_registry = agent_registry
+        self.evaluator = evaluator or CompositeQualityEvaluator()
         self._db_lock = asyncio.Lock()
 
     async def submit_workflow(
@@ -120,6 +132,7 @@ class WorkflowExecutionEngine:
                     agent_id=task_spec.agent_id,
                     status=initial_task_status,
                     attempt_count=0,
+                    revision_count=0,
                 )
                 execution.tasks[task_spec.task_key] = task_exec
 
@@ -229,21 +242,22 @@ class WorkflowExecutionEngine:
             ]
 
             if not ready_tasks:
-                # Check for active running tasks or waiting approval
+                # Check for active running tasks or waiting intervention
                 running_tasks = [
                     t for t in execution.tasks.values() if t.status == TaskExecutionStatus.RUNNING
                 ]
-                waiting_approval = [
-                    t for t in execution.tasks.values() if t.status == TaskExecutionStatus.WAITING_APPROVAL
+                waiting_intervention = [
+                    t for t in execution.tasks.values()
+                    if t.status in (TaskExecutionStatus.WAITING_APPROVAL, TaskExecutionStatus.ESCALATED)
                 ]
 
-                if not running_tasks and not waiting_approval:
+                if not running_tasks and not waiting_intervention:
                     # No tasks can make progress. Finalize workflow.
                     await self._finalize_workflow(execution, workflow)
                     break
 
-                if waiting_approval and not running_tasks:
-                    # Workflow is paused waiting on human approval
+                if waiting_intervention and not running_tasks:
+                    # Workflow is paused waiting on human intervention
                     break
 
                 await asyncio.sleep(poll_interval_seconds)
@@ -271,9 +285,10 @@ class WorkflowExecutionEngine:
         """
         Executes a single task within the workflow execution:
         - Atomic claim via SELECT FOR UPDATE
-        - Input mapping resolution from initial inputs + upstream outputs
+        - Input mapping resolution from initial inputs + upstream outputs + revision context
         - Agent discovery & invocation
         - Output & artifact persistence
+        - Layered Quality Evaluation & Revision Looping
         - State transition & retry handling
         """
         task_key = task_spec.task_key
@@ -287,7 +302,7 @@ class WorkflowExecutionEngine:
                 return
 
             # Build input payload
-            input_payload = await self._resolve_task_inputs(execution, task_spec)
+            input_payload = await self._resolve_task_inputs(execution, task_spec, claimed_task)
             claimed_task.input_data = input_payload
             await self.execution_repo.update_task_execution(claimed_task)
             execution.tasks[task_key] = claimed_task
@@ -298,7 +313,10 @@ class WorkflowExecutionEngine:
             task_key=task_key,
             agent_id=task_spec.agent_id,
             event_type=EventType.TASK_STARTED,
-            payload={"attempt_count": claimed_task.attempt_count},
+            payload={
+                "attempt_count": claimed_task.attempt_count,
+                "revision_count": claimed_task.revision_count,
+            },
         )
 
         # 2. Resolve agent from registry
@@ -325,6 +343,7 @@ class WorkflowExecutionEngine:
             workflow_execution_id=execution.id,
             workflow_id=execution.workflow_id,
             task_key=task_key,
+            attempt_number=claimed_task.attempt_count,
             input_payload=input_payload,
             timeout_seconds=task_spec.timeout_seconds,
         )
@@ -345,19 +364,17 @@ class WorkflowExecutionEngine:
         task_spec: TaskSpec,
         result: AgentResult,
     ) -> None:
-        """Handles successful agent output, artifact integrity verification, persistence, and approval gating."""
+        """Handles successful agent output, artifact verification, quality evaluation, and approval gating."""
         task_key = task_spec.task_key
         task_exec.output_data = result.structured_data
         task_exec.token_usage = result.token_metrics.model_dump()
         task_exec.execution_duration_ms = result.execution_duration_ms
         task_exec.completed_at = datetime.utcnow()
 
-        # Persist and verify produced artifacts
+        # 1. Persist and verify produced artifacts
         for prod_artifact in result.artifacts:
-            # Verify SHA-256 integrity
             computed_checksum = hashlib.sha256(prod_artifact.content_or_uri.encode("utf-8")).hexdigest()
             if prod_artifact.checksum_sha256 != computed_checksum:
-                # Corrupted artifact integrity -> fail task
                 task_exec.status = TaskExecutionStatus.FAILED
                 task_exec.error_details = {
                     "error": f"Artifact '{prod_artifact.name}' checksum mismatch. Expected {prod_artifact.checksum_sha256}, got {computed_checksum}",
@@ -396,7 +413,166 @@ class WorkflowExecutionEngine:
                 payload={"artifact_name": artifact.name, "checksum": artifact.checksum_sha256},
             )
 
-        # Check approval gate
+        # 2. Quality Evaluation Gate (if enabled)
+        if task_spec.evaluation_gate.enabled:
+            eval_gate = task_spec.evaluation_gate
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.EVALUATION_STARTED,
+                payload={"revision_count": task_exec.revision_count, "evaluator": eval_gate.evaluator_name},
+            )
+
+            eval_request = EvaluationRequest(
+                workflow_execution_id=execution.id,
+                task_key=task_key,
+                agent_id=task_spec.agent_id,
+                input_payload=task_exec.input_data,
+                output_payload=result.structured_data,
+                produced_artifacts=[a.model_dump() for a in result.artifacts],
+                evaluation_criteria=eval_gate.criteria,
+                min_pass_score=eval_gate.min_pass_score,
+                current_revision=task_exec.revision_count,
+                max_revisions=eval_gate.max_revisions,
+            )
+
+            eval_result: EvaluationResult = await self.evaluator.evaluate(eval_request)
+            
+            # Save evaluation history in structured audit trail
+            task_exec.evaluation_history.append(eval_result.model_dump())
+
+            await self._emit_event(
+                execution_id=execution.id,
+                workflow_id=execution.workflow_id,
+                task_key=task_key,
+                agent_id=task_spec.agent_id,
+                event_type=EventType.EVALUATION_COMPLETED,
+                payload={
+                    "verdict": eval_result.verdict.value,
+                    "score": eval_result.score,
+                    "passed_checks": eval_result.passed_checks,
+                    "failed_checks": eval_result.failed_checks,
+                    "duration_ms": eval_result.evaluation_duration_ms,
+                },
+            )
+
+            # Process Evaluation Verdict
+            if eval_result.verdict == EvaluationVerdict.PASS:
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=execution.workflow_id,
+                    task_key=task_key,
+                    agent_id=task_spec.agent_id,
+                    event_type=EventType.EVALUATION_PASSED,
+                    payload={"score": eval_result.score},
+                )
+                # Proceed to approval or completion
+            elif eval_result.verdict == EvaluationVerdict.REQUIRES_REVISION:
+                # Check revision budget
+                if task_exec.revision_count < eval_gate.max_revisions:
+                    WorkflowStateMachine.transition_task(
+                        task_exec,
+                        TaskCommand.REVISE,
+                        max_revisions=eval_gate.max_revisions,
+                    )
+                    # Construct and attach bounded RevisionContext
+                    rev_ctx = RevisionContext(
+                        revision_number=task_exec.revision_count,
+                        evaluator_verdict=eval_result.verdict,
+                        score=eval_result.score,
+                        failed_checks=eval_result.failed_checks,
+                        required_changes=eval_result.required_changes,
+                        actionable_feedback=eval_result.actionable_feedback,
+                    )
+                    task_exec.input_data["_revision_context"] = rev_ctx.model_dump()
+                    async with self._db_lock:
+                        await self.execution_repo.update_task_execution(task_exec)
+                        execution.tasks[task_key] = task_exec
+                    await self._emit_event(
+                        execution_id=execution.id,
+                        workflow_id=execution.workflow_id,
+                        task_key=task_key,
+                        agent_id=task_spec.agent_id,
+                        event_type=EventType.REVISION_REQUESTED,
+                        payload={
+                            "revision_number": task_exec.revision_count,
+                            "required_changes": eval_result.required_changes,
+                            "actionable_feedback": eval_result.actionable_feedback,
+                        },
+                    )
+                    return
+                else:
+                    # Revision budget exhausted -> apply rejection policy
+                    if eval_gate.rejection_policy == "ESCALATE":
+                        WorkflowStateMachine.transition_task(task_exec, TaskCommand.ESCALATE)
+                        async with self._db_lock:
+                            await self.execution_repo.update_task_execution(task_exec)
+                            execution.tasks[task_key] = task_exec
+                        await self._emit_event(
+                            execution_id=execution.id,
+                            workflow_id=execution.workflow_id,
+                            task_key=task_key,
+                            agent_id=task_spec.agent_id,
+                            event_type=EventType.EVALUATION_ESCALATED,
+                            payload={"reason": "Revision budget exhausted", "rejection_policy": "ESCALATE"},
+                        )
+                        return
+                    else:
+                        WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
+                        task_exec.error_details = {
+                            "error": "Evaluation revision budget exhausted",
+                            "failed_checks": eval_result.failed_checks,
+                            "revision_count": task_exec.revision_count,
+                        }
+                        async with self._db_lock:
+                            await self.execution_repo.update_task_execution(task_exec)
+                            execution.tasks[task_key] = task_exec
+                        await self._emit_event(
+                            execution_id=execution.id,
+                            workflow_id=execution.workflow_id,
+                            task_key=task_key,
+                            agent_id=task_spec.agent_id,
+                            event_type=EventType.EVALUATION_FAILED,
+                            payload={"error": task_exec.error_details["error"]},
+                        )
+                        return
+            elif eval_result.verdict == EvaluationVerdict.ESCALATE:
+                WorkflowStateMachine.transition_task(task_exec, TaskCommand.ESCALATE)
+                async with self._db_lock:
+                    await self.execution_repo.update_task_execution(task_exec)
+                    execution.tasks[task_key] = task_exec
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=execution.workflow_id,
+                    task_key=task_key,
+                    agent_id=task_spec.agent_id,
+                    event_type=EventType.EVALUATION_ESCALATED,
+                    payload={"rationale": eval_result.rationale},
+                )
+                return
+            else:
+                # EvaluationVerdict.FAIL
+                WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
+                task_exec.error_details = {
+                    "error": f"Evaluation rejected task output: {eval_result.rationale}",
+                    "failed_checks": eval_result.failed_checks,
+                }
+                async with self._db_lock:
+                    await self.execution_repo.update_task_execution(task_exec)
+                    execution.tasks[task_key] = task_exec
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=execution.workflow_id,
+                    task_key=task_key,
+                    agent_id=task_spec.agent_id,
+                    event_type=EventType.EVALUATION_FAILED,
+                    payload={"error": eval_result.rationale},
+                )
+                return
+
+        # 3. Check approval gate
         if task_spec.approval_gate.required:
             WorkflowStateMachine.transition_task(task_exec, TaskCommand.REQUIRE_APPROVAL)
             async with self._db_lock:
@@ -489,12 +665,14 @@ class WorkflowExecutionEngine:
         self,
         execution: WorkflowExecution,
         task_spec: TaskSpec,
+        task_exec: Optional[TaskExecution] = None,
     ) -> Dict[str, Any]:
         """
         Builds the input dictionary for a task by combining:
         1. Static inputs defined on TaskSpec
         2. Global initial workflow inputs
         3. Upstream task output mappings defined in input_mappings
+        4. Injected _revision_context if executing a revision cycle
         """
         resolved: Dict[str, Any] = {}
         resolved.update(task_spec.static_inputs)
@@ -513,9 +691,12 @@ class WorkflowExecutionEngine:
                     if src_field in upstream_output:
                         resolved[target_key] = upstream_output[src_field]
             else:
-                # Direct task key reference
                 if source_expr in execution.tasks:
                     resolved[target_key] = execution.tasks[source_expr].output_data
+
+        # Preserve revision context if present on task_exec
+        if task_exec and "_revision_context" in task_exec.input_data:
+            resolved["_revision_context"] = task_exec.input_data["_revision_context"]
 
         return resolved
 

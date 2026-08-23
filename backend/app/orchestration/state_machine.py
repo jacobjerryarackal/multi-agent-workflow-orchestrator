@@ -34,6 +34,8 @@ class TaskCommand(str, Enum):
     APPROVE = "APPROVE"
     REJECT = "REJECT"
     RETRY = "RETRY"
+    REVISE = "REVISE"
+    ESCALATE = "ESCALATE"
     FAIL = "FAIL"
     TIMEOUT = "TIMEOUT"
     CANCEL = "CANCEL"
@@ -158,6 +160,14 @@ class WorkflowStateMachine:
             TaskExecutionStatus.RUNNING, TaskCommand.RETRY, TaskExecutionStatus.READY,
             "Transient failure detected; task re-queued for retry"
         ),
+        (TaskExecutionStatus.RUNNING, TaskCommand.REVISE): TaskTransitionRule(
+            TaskExecutionStatus.RUNNING, TaskCommand.REVISE, TaskExecutionStatus.READY,
+            "Task output failed quality evaluation; re-queued for revision cycle"
+        ),
+        (TaskExecutionStatus.RUNNING, TaskCommand.ESCALATE): TaskTransitionRule(
+            TaskExecutionStatus.RUNNING, TaskCommand.ESCALATE, TaskExecutionStatus.ESCALATED,
+            "Task output quality failed or high-risk; escalated to human operator"
+        ),
         (TaskExecutionStatus.RUNNING, TaskCommand.FAIL): TaskTransitionRule(
             TaskExecutionStatus.RUNNING, TaskCommand.FAIL, TaskExecutionStatus.FAILED,
             "Fatal failure or retries exhausted"
@@ -185,6 +195,10 @@ class WorkflowStateMachine:
         (TaskExecutionStatus.WAITING_APPROVAL, TaskCommand.CANCEL): TaskTransitionRule(
             TaskExecutionStatus.WAITING_APPROVAL, TaskCommand.CANCEL, TaskExecutionStatus.CANCELLED,
             "Workflow cancelled while awaiting approval"
+        ),
+        (TaskExecutionStatus.ESCALATED, TaskCommand.APPROVE): TaskTransitionRule(
+            TaskExecutionStatus.ESCALATED, TaskCommand.APPROVE, TaskExecutionStatus.COMPLETED,
+            "Human operator approved escalated task output"
         ),
         (TaskExecutionStatus.ESCALATED, TaskCommand.RETRY): TaskTransitionRule(
             TaskExecutionStatus.ESCALATED, TaskCommand.RETRY, TaskExecutionStatus.READY,
@@ -243,11 +257,12 @@ class WorkflowStateMachine:
         task_execution: TaskExecution,
         command: TaskCommand,
         max_retries: int = 3,
+        max_revisions: Optional[int] = None,
         reason: Optional[str] = None,
     ) -> TaskExecutionStatus:
         """
         Validates and transitions a TaskExecution to a new status.
-        Enforces retry count guards, terminal protection, and state invariants.
+        Enforces retry count guards, revision count guards, terminal protection, and state invariants.
         Raises StateTransitionError if the transition is illegal or violates guards.
         """
         current_status = task_execution.status
@@ -259,13 +274,19 @@ class WorkflowStateMachine:
             )
 
         # Invariant 2: Retry bounds guard (attempt_count > max_retries)
-        # Note: attempt_count represents total execution attempts (1 = first run, 2 = 1st retry, etc.)
-        # If attempt_count > max_retries, all allowed retries have been exhausted.
         if command == TaskCommand.RETRY:
             if task_execution.attempt_count > max_retries:
                 raise StateTransitionError(
                     f"Retry limit exhausted for task '{task_execution.task_key}'. "
                     f"Execution attempts ({task_execution.attempt_count}) exceeded max_retries ({max_retries})."
+                )
+
+        # Invariant 3: Revision bounds guard (revision_count >= max_revisions)
+        if command == TaskCommand.REVISE:
+            if max_revisions is not None and task_execution.revision_count >= max_revisions:
+                raise StateTransitionError(
+                    f"Revision limit exhausted for task '{task_execution.task_key}'. "
+                    f"Revision count ({task_execution.revision_count}) reached max_revisions ({max_revisions})."
                 )
 
         key = (current_status, command)
@@ -275,9 +296,13 @@ class WorkflowStateMachine:
                 f"Illegal task transition: Cannot apply command '{command.value}' to task '{task_execution.task_key}' from status '{current_status.value}'."
             )
 
-        # Invariant 3: Increment attempt count on dispatch
+        # Invariant 4: Increment attempt count on dispatch
         if command == TaskCommand.DISPATCH:
             task_execution.attempt_count += 1
+
+        # Invariant 5: Increment revision count on revision request
+        if command == TaskCommand.REVISE:
+            task_execution.revision_count += 1
 
         task_execution.status = rule.to_status
         return rule.to_status
