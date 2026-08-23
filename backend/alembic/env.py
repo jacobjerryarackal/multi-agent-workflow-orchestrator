@@ -18,8 +18,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from app settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Set database URL dynamically from app settings or environment
+import os
+db_url = os.environ.get("DATABASE_URL") or settings.DATABASE_URL
+config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
 
@@ -47,9 +49,9 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine."""
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    from sqlalchemy.ext.asyncio import create_async_engine
+    connectable = create_async_engine(
+        db_url,
         poolclass=pool.NullPool,
     )
 
