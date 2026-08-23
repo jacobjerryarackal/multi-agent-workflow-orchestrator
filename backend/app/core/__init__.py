@@ -12,6 +12,8 @@ from .exceptions import (
     CircuitBreakerOpenError,
     ArtifactIntegrityError,
     ApprovalGateError,
+    EvaluatorError,
+    ModelProviderError,
 )
 
 __all__ = [
@@ -27,4 +29,6 @@ __all__ = [
     "CircuitBreakerOpenError",
     "ArtifactIntegrityError",
     "ApprovalGateError",
+    "EvaluatorError",
+    "ModelProviderError",
 ]

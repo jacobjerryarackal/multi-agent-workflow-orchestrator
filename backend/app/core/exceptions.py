@@ -70,3 +70,13 @@ class ArtifactIntegrityError(OrchestratorException):
 class ApprovalGateError(OrchestratorException):
     """Raised when an invalid approval action is attempted or approval SLA expires."""
     pass
+
+
+class EvaluatorError(OrchestratorException):
+    """Raised when an evaluator fails, encounters infrastructure errors, or times out."""
+    pass
+
+
+class ModelProviderError(OrchestratorException):
+    """Raised when an LLM model provider encounters an error during structured or text generation."""
+    pass
