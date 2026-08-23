@@ -1,6 +1,7 @@
 """Global Pytest fixtures and mock setups."""
 
 import pytest
+import pytest_asyncio
 from typing import Any, Dict, Type, Tuple
 from pydantic import BaseModel
 from app.domain.models import (
@@ -83,3 +84,21 @@ def sample_workflow_spec(sample_task_spec: TaskSpec) -> WorkflowSpec:
         output_schema={"type": "object", "properties": {"result": {"type": "string"}}},
         tasks=[sample_task_spec],
     )
+
+
+@pytest_asyncio.fixture
+async def db_session():
+    """Provides an isolated in-memory SQLite database session for unit and engine tests."""
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    from app.persistence.database import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+
+    await engine.dispose()
+
