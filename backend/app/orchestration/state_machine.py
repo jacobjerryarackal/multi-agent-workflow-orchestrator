@@ -258,12 +258,14 @@ class WorkflowStateMachine:
                 f"Cannot execute command '{command.value}' on task '{task_execution.task_key}' in terminal state '{current_status.value}'."
             )
 
-        # Invariant 2: Retry bounds guard
+        # Invariant 2: Retry bounds guard (attempt_count > max_retries)
+        # Note: attempt_count represents total execution attempts (1 = first run, 2 = 1st retry, etc.)
+        # If attempt_count > max_retries, all allowed retries have been exhausted.
         if command == TaskCommand.RETRY:
-            if task_execution.attempt_count >= max_retries:
+            if task_execution.attempt_count > max_retries:
                 raise StateTransitionError(
                     f"Retry limit exhausted for task '{task_execution.task_key}'. "
-                    f"Attempt count ({task_execution.attempt_count}) >= max_retries ({max_retries})."
+                    f"Execution attempts ({task_execution.attempt_count}) exceeded max_retries ({max_retries})."
                 )
 
         key = (current_status, command)
