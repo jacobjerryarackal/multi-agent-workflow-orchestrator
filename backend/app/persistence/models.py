@@ -249,8 +249,10 @@ class TaskExecutionModel(Base):
     agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revision_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     input_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     output_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    evaluation_history: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     error_details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -275,8 +277,10 @@ class TaskExecutionModel(Base):
             agent_id=self.agent_id,
             status=TaskExecutionStatus(self.status),
             attempt_count=self.attempt_count,
+            revision_count=self.revision_count,
             input_data=self.input_data,
             output_data=self.output_data,
+            evaluation_history=self.evaluation_history,
             error_details=self.error_details,
             started_at=self.started_at,
             completed_at=self.completed_at,
@@ -293,8 +297,10 @@ class TaskExecutionModel(Base):
             agent_id=domain.agent_id,
             status=domain.status.value,
             attempt_count=domain.attempt_count,
+            revision_count=domain.revision_count,
             input_data=domain.input_data,
             output_data=domain.output_data,
+            evaluation_history=domain.evaluation_history,
             error_details=domain.error_details,
             started_at=domain.started_at,
             completed_at=domain.completed_at,

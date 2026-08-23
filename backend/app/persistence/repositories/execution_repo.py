@@ -75,8 +75,10 @@ class SqlExecutionRepository(ExecutionRepository):
         else:
             model.status = task_exec.status.value
             model.attempt_count = task_exec.attempt_count
+            model.revision_count = task_exec.revision_count
             model.input_data = task_exec.input_data
             model.output_data = task_exec.output_data
+            model.evaluation_history = task_exec.evaluation_history
             model.error_details = task_exec.error_details
             model.started_at = task_exec.started_at
             model.completed_at = task_exec.completed_at
