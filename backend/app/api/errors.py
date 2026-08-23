@@ -186,12 +186,16 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     CRITICAL: Sanitizes stack traces, secrets, and raw internals from response.
     """
     correlation_id = get_correlation_id()
-    logger.exception(
-        "Unhandled server exception",
-        correlation_id=correlation_id,
-        path=request.url.path,
-        exc_info=exc,
-    )
+    try:
+        logger.error(
+            "Unhandled server exception",
+            correlation_id=correlation_id,
+            path=request.url.path,
+            error_type=type(exc).__name__,
+            error_msg=str(exc),
+        )
+    except Exception:
+        pass
 
     return create_error_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -199,6 +203,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         message="An unexpected server error occurred. Please reference correlation ID.",
         details={"correlation_id": correlation_id},
     )
+
 
 
 def register_exception_handlers(app: FastAPI) -> None:

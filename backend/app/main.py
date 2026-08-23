@@ -12,7 +12,15 @@ from .api.errors import register_exception_handlers
 from .api.middleware.correlation import CorrelationIdMiddleware, get_correlation_id
 from .api.middleware.security import SecurityHeadersMiddleware
 from .api.v1 import v1_router
-from .persistence.database import engine
+from .persistence.database import engine, Base
+from .persistence.models import (
+    WorkflowModel,
+    WorkflowTaskModel,
+    WorkflowExecutionModel,
+    TaskExecutionModel,
+    WorkflowEventModel,
+    ArtifactModel,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -21,7 +29,7 @@ logger = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan context manager:
-    - Startup: Confirms configuration, verifies readiness.
+    - Startup: Confirms configuration, verifies readiness and ensures database schemas.
     - Shutdown: Disposes database connection pool cleanly.
     """
     logger.info(
@@ -29,10 +37,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app_name=settings.APP_NAME,
         env=settings.APP_ENV,
     )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
     logger.info("Shutting down Multi-Agent Workflow Orchestrator API")
     await engine.dispose()
     logger.info("Database engine connections closed")
+
 
 
 def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
