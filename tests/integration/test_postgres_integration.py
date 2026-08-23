@@ -159,3 +159,46 @@ async def test_postgres_transaction_rollback(pg_session: AsyncSession):
     # Should not exist
     retrieved = await wf_repo.get_workflow_spec(wf_spec.id)
     assert retrieved is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_evaluation_persistence(pg_session: AsyncSession):
+    """Verifies that evaluation_history and revision_count persist in PostgreSQL."""
+    wf_repo = SqlWorkflowRepository(pg_session)
+    exec_repo = SqlExecutionRepository(pg_session)
+
+    wf_spec = WorkflowSpec(
+        name="eval_pg_wf",
+        version=1,
+        description="PG Eval Test",
+        input_schema={},
+        output_schema={},
+        tasks=[TaskSpec(task_key="eval_node", name="Eval Node", agent_id="agent_eval")],
+    )
+    saved_wf = await wf_repo.save_workflow_spec(wf_spec)
+
+    wf_exec = WorkflowExecution(workflow_id=saved_wf.id, status=WorkflowExecutionStatus.RUNNING)
+    saved_exec = await exec_repo.create_workflow_execution(wf_exec)
+
+    task_exec = TaskExecution(
+        workflow_execution_id=saved_exec.id,
+        task_key="eval_node",
+        agent_id="agent_eval",
+        status=TaskExecutionStatus.COMPLETED,
+        revision_count=2,
+        evaluation_history=[
+            {"verdict": "REQUIRES_REVISION", "score": 0.5, "rationale": "Incomplete"},
+            {"verdict": "PASS", "score": 0.95, "rationale": "High quality"},
+        ],
+    )
+    await exec_repo.update_task_execution(task_exec)
+    await pg_session.commit()
+
+    # Re-query
+    retrieved_exec = await exec_repo.get_workflow_execution(saved_exec.id)
+    assert retrieved_exec is not None
+    t = retrieved_exec.tasks["eval_node"]
+    assert t.revision_count == 2
+    assert len(t.evaluation_history) == 2
+    assert t.evaluation_history[1]["verdict"] == "PASS"
+
