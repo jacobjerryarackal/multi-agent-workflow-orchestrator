@@ -72,7 +72,13 @@ async def check_system_health(
     # 2. Agent Registry Check
     try:
         registered_agents: List[str] = [agent.agent_id for agent in registry.list_agents()]
-        expected_builtins = ["planner", "researcher", "analyst", "reviewer", "synthesizer"]
+        expected_builtins = [
+            "planner_agent",
+            "researcher_agent",
+            "analyst_agent",
+            "reviewer_agent",
+            "synthesizer_agent",
+        ]
         all_present = all(agent_id in registered_agents for agent_id in expected_builtins)
 
         components["agent_registry"] = HealthComponentStatus(

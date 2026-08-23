@@ -30,6 +30,9 @@ from ..agents.builtins import (
 )
 from ..providers.gemini import GeminiModelProvider
 from ..evaluators.composite import CompositeQualityEvaluator
+from ..services.workflow_service import WorkflowService
+from ..services.execution_service import ExecutionService
+from ..services.system_service import SystemService
 
 # Global singleton instances for agent registry and model provider
 _global_registry: AgentRegistry | None = None
@@ -76,25 +79,67 @@ def get_model_provider() -> ModelProvider:
     return _global_provider
 
 
-def get_agent_registry() -> AgentRegistry:
-    """Provides singleton AgentRegistry initialized with all 5 specialized agents."""
-    global _global_registry
-    if _global_registry is None:
-        registry = AgentRegistry()
-        provider = get_model_provider()
-        registry.register(PlannerAgent(model_provider=provider))
-        registry.register(ResearcherAgent(model_provider=provider))
-        registry.register(AnalystAgent(model_provider=provider))
-        registry.register(ReviewerAgent(model_provider=provider))
-        registry.register(SynthesizerAgent(model_provider=provider))
-        _global_registry = registry
-    return _global_registry
+def get_agent_registry(
+    provider: ModelProvider = Depends(get_model_provider),
+) -> AgentRegistry:
+    """Provides AgentRegistry initialized with all 5 specialized agents bound to model provider."""
+    registry = AgentRegistry()
+    registry.register(PlannerAgent(model_provider=provider))
+    registry.register(ResearcherAgent(model_provider=provider))
+    registry.register(AnalystAgent(model_provider=provider))
+    registry.register(ReviewerAgent(model_provider=provider))
+    registry.register(SynthesizerAgent(model_provider=provider))
+    return registry
 
 
-def get_evaluator() -> EvaluationProvider:
+def get_evaluator(
+    provider: ModelProvider = Depends(get_model_provider),
+) -> EvaluationProvider:
     """Provides CompositeQualityEvaluator combining Layer 1 deterministic & Layer 2 LLM judge."""
-    global _global_evaluator
-    if _global_evaluator is None:
-        provider = get_model_provider()
-        _global_evaluator = CompositeQualityEvaluator(model_provider=provider)
-    return _global_evaluator
+    return CompositeQualityEvaluator(model_provider=provider)
+
+
+def get_workflow_service(
+    workflow_repo: WorkflowRepository = Depends(get_workflow_repo),
+) -> "WorkflowService":
+    """Provides WorkflowService bound to request repository."""
+    from ..services.workflow_service import WorkflowService
+    return WorkflowService(workflow_repo=workflow_repo)
+
+
+def get_execution_service(
+    workflow_repo: WorkflowRepository = Depends(get_workflow_repo),
+    execution_repo: ExecutionRepository = Depends(get_execution_repo),
+    event_repo: EventRepository = Depends(get_event_repo),
+    artifact_repo: ArtifactRepository = Depends(get_artifact_repo),
+    registry: AgentRegistry = Depends(get_agent_registry),
+    evaluator: EvaluationProvider = Depends(get_evaluator),
+) -> "ExecutionService":
+    """Provides ExecutionService with instantiated WorkflowExecutionEngine."""
+    from ..services.execution_service import ExecutionService
+    from ..orchestration.execution_engine import WorkflowExecutionEngine
+
+    engine = WorkflowExecutionEngine(
+        workflow_repo=workflow_repo,
+        execution_repo=execution_repo,
+        event_repo=event_repo,
+        artifact_repo=artifact_repo,
+        agent_registry=registry,
+        evaluator=evaluator,
+    )
+    return ExecutionService(
+        workflow_repo=workflow_repo,
+        execution_repo=execution_repo,
+        event_repo=event_repo,
+        artifact_repo=artifact_repo,
+        engine=engine,
+    )
+
+
+def get_system_service(
+    registry: AgentRegistry = Depends(get_agent_registry),
+) -> "SystemService":
+    """Provides SystemService bound to singleton AgentRegistry."""
+    from ..services.system_service import SystemService
+    return SystemService(registry=registry)
+
