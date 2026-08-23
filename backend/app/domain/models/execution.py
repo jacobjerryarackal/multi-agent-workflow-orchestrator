@@ -40,8 +40,10 @@ class TaskExecution(BaseModel):
     agent_id: str
     status: TaskExecutionStatus = TaskExecutionStatus.PENDING
     attempt_count: int = 0
+    revision_count: int = Field(default=0, ge=0, description="Evaluation revision cycle count")
     input_data: Dict[str, Any] = Field(default_factory=dict)
     output_data: Dict[str, Any] = Field(default_factory=dict)
+    evaluation_history: List[Dict[str, Any]] = Field(default_factory=list, description="Audit history of structured evaluation outcomes")
     error_details: Optional[Dict[str, Any]] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None

@@ -34,9 +34,12 @@ class ApprovalGateSpec(BaseModel):
 class EvaluationGateSpec(BaseModel):
     """Configuration for automated quality evaluation gates."""
     enabled: bool = Field(default=False, description="Whether this task output requires quality evaluation")
-    evaluator_name: str = Field(default="standard_quality_check")
-    min_pass_score: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum acceptable quality threshold")
-    rejection_policy: str = Field(default="RETRY", description="'RETRY', 'ESCALATE', or 'FAIL'")
+    evaluator_name: str = Field(default="composite_quality_evaluator", description="Target evaluator name")
+    min_pass_score: float = Field(default=0.8, ge=0.0, le=1.0, description="Minimum acceptable quality threshold [0.0, 1.0]")
+    max_revisions: int = Field(default=2, ge=0, le=4, description="Maximum allowed evaluation revision cycles [0, 4]")
+    deterministic_rules: List[str] = Field(default_factory=list, description="List of deterministic rule IDs to enforce")
+    criteria: Dict[str, Any] = Field(default_factory=dict, description="Semantic criteria evaluated by LLM judge")
+    rejection_policy: str = Field(default="FAIL", description="'FAIL', 'ESCALATE', or 'RETRY' upon revision exhaustion")
 
 
 class TaskSpec(BaseModel):

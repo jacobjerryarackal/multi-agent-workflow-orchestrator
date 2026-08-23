@@ -35,6 +35,12 @@ from .failure import (
     RecoveryActionType,
     FailureRecord,
 )
+from .evaluation import (
+    EvaluationVerdict,
+    RevisionContext,
+    EvaluationRequest,
+    EvaluationResult,
+)
 
 __all__ = [
     "WorkflowSpec",
@@ -60,4 +66,8 @@ __all__ = [
     "FailureSeverity",
     "RecoveryActionType",
     "FailureRecord",
+    "EvaluationVerdict",
+    "RevisionContext",
+    "EvaluationRequest",
+    "EvaluationResult",
 ]
