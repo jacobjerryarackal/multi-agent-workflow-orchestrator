@@ -55,7 +55,7 @@ export default function ExecutionDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"timeline" | "dag" | "events" | "artifacts" | "io">("timeline");
 
-  const loadExecutionData = async () => {
+  const loadExecutionData = React.useCallback(async () => {
     if (!executionId) return;
     try {
       const exec = await getExecution(executionId);
@@ -75,7 +75,7 @@ export default function ExecutionDetailPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [executionId]);
 
   useEffect(() => {
     loadExecutionData();
@@ -86,7 +86,7 @@ export default function ExecutionDetailPage() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  }, [executionId, execution?.status]);
+  }, [executionId, execution?.status, loadExecutionData]);
 
   const handleCancel = async () => {
     if (!confirm("Are you sure you want to cancel this active execution run?")) return;

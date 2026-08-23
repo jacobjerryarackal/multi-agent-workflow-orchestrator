@@ -41,7 +41,7 @@ export default function WorkflowDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"dag" | "json">("dag");
 
-  const loadWorkflowData = async () => {
+  const loadWorkflowData = React.useCallback(async () => {
     if (!workflowId) return;
     setIsLoading(true);
     setError(null);
@@ -60,11 +60,11 @@ export default function WorkflowDetailPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [workflowId]);
 
   useEffect(() => {
     loadWorkflowData();
-  }, [workflowId]);
+  }, [loadWorkflowData]);
 
   if (isLoading) {
     return <LoadingState message="Loading workflow specification..." />;
