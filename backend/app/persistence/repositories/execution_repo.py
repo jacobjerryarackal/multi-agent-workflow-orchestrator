@@ -2,6 +2,7 @@
 
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from ...domain.models.execution import (
     WorkflowExecution,
@@ -28,6 +29,7 @@ class SqlExecutionRepository(ExecutionRepository):
     async def get_workflow_execution(self, execution_id: str) -> Optional[WorkflowExecution]:
         stmt = (
             select(WorkflowExecutionModel)
+            .options(selectinload(WorkflowExecutionModel.task_executions))
             .where(WorkflowExecutionModel.id == execution_id)
             .execution_options(populate_existing=True)
         )
@@ -38,9 +40,13 @@ class SqlExecutionRepository(ExecutionRepository):
     async def get_workflow_execution_by_idempotency_key(
         self, workflow_id: str, idempotency_key: str
     ) -> Optional[WorkflowExecution]:
-        stmt = select(WorkflowExecutionModel).where(
-            WorkflowExecutionModel.workflow_id == workflow_id,
-            WorkflowExecutionModel.idempotency_key == idempotency_key,
+        stmt = (
+            select(WorkflowExecutionModel)
+            .options(selectinload(WorkflowExecutionModel.task_executions))
+            .where(
+                WorkflowExecutionModel.workflow_id == workflow_id,
+                WorkflowExecutionModel.idempotency_key == idempotency_key,
+            )
         )
         result = await self.session.execute(stmt)
         model = result.scalar_one_or_none()
@@ -53,7 +59,9 @@ class SqlExecutionRepository(ExecutionRepository):
         limit: int = 50,
         offset: int = 0,
     ) -> list[WorkflowExecution]:
-        stmt = select(WorkflowExecutionModel)
+        stmt = select(WorkflowExecutionModel).options(
+            selectinload(WorkflowExecutionModel.task_executions)
+        )
         if workflow_id:
             stmt = stmt.where(WorkflowExecutionModel.workflow_id == workflow_id)
         if status:
@@ -62,6 +70,7 @@ class SqlExecutionRepository(ExecutionRepository):
         result = await self.session.execute(stmt)
         models = result.scalars().all()
         return [m.to_domain() for m in models]
+
 
     async def update_workflow_execution(self, execution: WorkflowExecution) -> WorkflowExecution:
         stmt = select(WorkflowExecutionModel).where(WorkflowExecutionModel.id == execution.id)
