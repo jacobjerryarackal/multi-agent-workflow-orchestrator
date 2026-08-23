@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+import hashlib
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -9,6 +10,7 @@ import structlog
 
 from ..core.exceptions import (
     AgentNotFoundError,
+    ArtifactIntegrityError,
     OrchestratorException,
     StateTransitionError,
     WorkflowNotFoundError,
@@ -180,7 +182,23 @@ class WorkflowExecutionEngine:
             ):
                 break
 
-            # 1. Update task statuses based on DAG dependency resolution
+            # 1. Global Workflow Timeout Check
+            elapsed_seconds = time.perf_counter() - start_time
+            if elapsed_seconds > workflow.max_workflow_duration_seconds:
+                async with self._db_lock:
+                    WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.TIMEOUT)
+                    execution.completed_at = datetime.utcnow()
+                    execution.error_summary = f"Workflow exceeded maximum duration of {workflow.max_workflow_duration_seconds}s."
+                    await self.execution_repo.update_workflow_execution(execution)
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=workflow.id,
+                    event_type=EventType.WORKFLOW_TIMED_OUT,
+                    payload={"duration_seconds": elapsed_seconds},
+                )
+                break
+
+            # 2. Update task statuses based on DAG dependency resolution
             completed_keys = {
                 k for k, t in execution.tasks.items() if t.status == TaskExecutionStatus.COMPLETED
             }
@@ -205,7 +223,7 @@ class WorkflowExecutionEngine:
                             }
                             await self.execution_repo.update_task_execution(task_exec)
 
-            # 2. Identify ready tasks to dispatch
+            # 3. Identify ready tasks to dispatch
             ready_tasks = [
                 t for t in execution.tasks.values() if t.status == TaskExecutionStatus.READY
             ]
@@ -233,7 +251,7 @@ class WorkflowExecutionEngine:
 
             tasks_to_run = ready_tasks[: workflow.max_parallel_tasks]
 
-            # 3. Execute ready tasks concurrently
+            # 4. Execute ready tasks concurrently
             await asyncio.gather(
                 *[self._process_single_task(execution, task_spec_map[t.task_key]) for t in tasks_to_run]
             )
@@ -302,7 +320,7 @@ class WorkflowExecutionEngine:
             )
             return
 
-        # 3. Construct bounded AgentExecutionContext
+        # 3. Construct bounded AgentExecutionContext (isolated context boundary)
         agent_context = AgentExecutionContext(
             workflow_execution_id=execution.id,
             workflow_id=execution.workflow_id,
@@ -327,15 +345,37 @@ class WorkflowExecutionEngine:
         task_spec: TaskSpec,
         result: AgentResult,
     ) -> None:
-        """Handles successful agent output, artifact persistence, and approval gating."""
+        """Handles successful agent output, artifact integrity verification, persistence, and approval gating."""
         task_key = task_spec.task_key
         task_exec.output_data = result.structured_data
         task_exec.token_usage = result.token_metrics.model_dump()
         task_exec.execution_duration_ms = result.execution_duration_ms
         task_exec.completed_at = datetime.utcnow()
 
-        # Persist produced artifacts
+        # Persist and verify produced artifacts
         for prod_artifact in result.artifacts:
+            # Verify SHA-256 integrity
+            computed_checksum = hashlib.sha256(prod_artifact.content_or_uri.encode("utf-8")).hexdigest()
+            if prod_artifact.checksum_sha256 != computed_checksum:
+                # Corrupted artifact integrity -> fail task
+                task_exec.status = TaskExecutionStatus.FAILED
+                task_exec.error_details = {
+                    "error": f"Artifact '{prod_artifact.name}' checksum mismatch. Expected {prod_artifact.checksum_sha256}, got {computed_checksum}",
+                    "category": "artifact_integrity_failure",
+                }
+                async with self._db_lock:
+                    await self.execution_repo.update_task_execution(task_exec)
+                    execution.tasks[task_key] = task_exec
+                await self._emit_event(
+                    execution_id=execution.id,
+                    workflow_id=execution.workflow_id,
+                    task_key=task_spec.task_key,
+                    agent_id=task_spec.agent_id,
+                    event_type=EventType.TASK_FAILED,
+                    payload={"error": task_exec.error_details["error"]},
+                )
+                return
+
             artifact = Artifact(
                 workflow_execution_id=execution.id,
                 task_key=task_spec.task_key,
