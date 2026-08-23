@@ -11,7 +11,7 @@ from .core.config import Settings, settings
 from .api.errors import register_exception_handlers
 from .api.middleware.correlation import CorrelationIdMiddleware, get_correlation_id
 from .api.middleware.security import SecurityHeadersMiddleware
-from .api.health import health_router
+from .api.v1 import v1_router
 from .persistence.database import engine
 
 logger = structlog.get_logger(__name__)
@@ -73,7 +73,7 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     register_exception_handlers(app)
 
     # 3. Register Core API Routers
-    app.include_router(health_router, prefix="/api/v1")
+    app.include_router(v1_router)
 
     # 4. Root Service Metadata Route
     @app.get("/", tags=["Root"], summary="API Root Metadata")
