@@ -19,3 +19,11 @@ pythonpath = ["backend"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pyright]
+include = ["backend", "tests"]
+extraPaths = ["backend"]
+pythonVersion = "3.11"
+pythonPlatform = "All"
+typeCheckingMode = "basic"
+
