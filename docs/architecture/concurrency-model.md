@@ -33,19 +33,38 @@ The orchestrator executes multi-agent workflows with both sequential and paralle
 * The database has a unique index on `workflow_executions(workflow_id, idempotency_key)`.
 * If a duplicate request arrives, the server returns the existing `WorkflowExecution` record without re-spawning the engine loop.
 
-### 2.2 Atomic Task Claiming with Database Row Locking
-When the scheduler identifies ready tasks to dispatch to workers:
-```sql
--- Atomic Task Acquisition
-SELECT * FROM task_executions 
-WHERE id = :task_id AND status = 'READY' 
-FOR UPDATE;
+### 2.2 Atomic Task Claiming with Database Row Locking (`SELECT ... FOR UPDATE`)
+When an async worker or scheduler loop attempts to acquire a task:
+```python
+stmt = (
+    select(TaskExecutionModel)
+    .where(
+        TaskExecutionModel.workflow_execution_id == workflow_execution_id,
+        TaskExecutionModel.task_key == task_key,
+        TaskExecutionModel.status == TaskExecutionStatus.READY.value,
+    )
+    .with_for_update()
+)
+result = await session.execute(stmt)
+model = result.scalar_one_or_none()
+if not model:
+    return None  # Already claimed by another concurrent worker
 
-UPDATE task_executions 
-SET status = 'RUNNING', attempt_count = attempt_count + 1, started_at = NOW() 
-WHERE id = :task_id;
+model.status = TaskExecutionStatus.RUNNING.value
+model.attempt_count += 1
+model.started_at = datetime.utcnow()
+await session.flush()
 ```
-If another worker or retry loop tries to acquire the same task, the `WHERE status = 'READY'` condition fails or waits on the row lock, preventing double execution.
+
+#### Detailed Concurrency Characteristics:
+1. **Locked Row**: The exact `task_executions` record for `(workflow_execution_id, task_key)`.
+2. **Lock Window**: Exclusive row lock held from the moment `SELECT ... FOR UPDATE` executes until the transaction commits (`async with session.begin():`).
+3. **Double Dispatch Elimination**: If two concurrent scheduler routines attempt to claim the same `READY` task simultaneously:
+   - Worker 1 acquires the row lock, checks `status == 'READY'`, mutates it to `'RUNNING'`, increments `attempt_count`, and commits.
+   - Worker 2 unblocks from the lock, re-evaluates the query filter `status == 'READY'`, receives `None` (0 rows), and cleanly exits without dispatching.
+4. **Worker Crash & Orphan Handling**: If a worker process crashes while a task is `RUNNING`:
+   - The transaction aborts/releases the row lock.
+   - The orchestrator's periodic reconciliation loop identifies tasks in `RUNNING` exceeding `task.timeout_seconds` + grace period and transitions them to `TIMED_OUT` (or re-queues them via `TaskCommand.RETRY`).
 
 ### 2.3 Terminal State Immutability
 Once a task reaches a terminal state (`COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`), `WorkflowStateMachine.transition_task()` raises `StateTransitionError` on any subsequent command, preventing racing timeouts or delayed responses from overwriting a completed task.
