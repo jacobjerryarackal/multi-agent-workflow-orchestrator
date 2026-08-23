@@ -1,0 +1,23 @@
+# Core Web & API Framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.4
+pydantic-settings>=2.3.4
+
+# Database & ORM
+sqlalchemy>=2.0.31
+alembic>=1.13.1
+asyncpg>=0.29.0
+greenlet>=3.0.3
+
+# HTTP Client & Resilience
+httpx>=0.27.0
+structlog>=24.2.0
+
+# LLM Provider SDK
+google-genai>=0.1.1
+
+# Testing & Quality
+pytest>=8.2.2
+pytest-asyncio>=0.23.7
+pytest-cov>=5.0.0
