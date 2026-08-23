@@ -1,4 +1,4 @@
-"""Comprehensive unit tests verifying Workflow and Task state machine transitions, guards, and DAG validation."""
+"""Comprehensive unit tests verifying Workflow and Task state machine transitions, guards, DAG validation, and attempt models."""
 
 import pytest
 from app.domain.models import (
@@ -119,27 +119,72 @@ def test_task_blocking_and_unblocking():
     assert task.status == TaskExecutionStatus.READY
 
 
-def test_task_retry_within_bounds():
-    task = TaskExecution(workflow_execution_id="exec-1", task_key="task_c", agent_id="agent_1")
+# =============================================================================
+# 3. ATTEMPT MODEL & RETRY BOUNDS TESTS (max_retries = 0, 1, N)
+# =============================================================================
+
+def test_attempt_model_max_retries_zero():
+    """When max_retries = 0, only the 1 initial execution attempt is allowed. No retries."""
+    task = TaskExecution(workflow_execution_id="exec-1", task_key="task_strict", agent_id="agent_1")
     WorkflowStateMachine.transition_task(task, TaskCommand.READY)
     WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)  # attempt = 1
     assert task.attempt_count == 1
 
-    # RUNNING -> READY (retry)
-    WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=3)
+    # Failure occurs -> Cannot retry because attempt_count (1) > max_retries (0)
+    with pytest.raises(StateTransitionError, match="Retry limit exhausted"):
+        WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=0)
+
+    # Must transition to terminal FAILED
+    WorkflowStateMachine.transition_task(task, TaskCommand.FAIL)
+    assert task.status == TaskExecutionStatus.FAILED
+
+
+def test_attempt_model_max_retries_one():
+    """When max_retries = 1, 1 initial attempt + 1 retry = 2 total attempts allowed."""
+    task = TaskExecution(workflow_execution_id="exec-1", task_key="task_one_retry", agent_id="agent_1")
+    WorkflowStateMachine.transition_task(task, TaskCommand.READY)
+    WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)  # attempt = 1
+    assert task.attempt_count == 1
+
+    # Attempt 1 fails -> 1st retry allowed (1 <= 1)
+    WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=1)
     assert task.status == TaskExecutionStatus.READY
 
-    # Re-dispatch (attempt = 2)
+    # 2nd dispatch (1st retry execution) -> attempt = 2
+    WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)
+    assert task.attempt_count == 2
+    assert task.status == TaskExecutionStatus.RUNNING
+
+    # Attempt 2 fails -> 2nd retry rejected because attempt_count (2) > max_retries (1)
+    with pytest.raises(StateTransitionError, match="Retry limit exhausted"):
+        WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=1)
+
+
+def test_attempt_model_max_retries_three():
+    """When max_retries = 3, up to 4 total attempts allowed (1 initial + 3 retries)."""
+    task = TaskExecution(workflow_execution_id="exec-1", task_key="task_three_retries", agent_id="agent_1")
+    WorkflowStateMachine.transition_task(task, TaskCommand.READY)
+
+    # Initial Run (attempt 1)
+    WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)
+    assert task.attempt_count == 1
+
+    # Retry 1 (allowed: 1 <= 3)
+    WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=3)
     WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)
     assert task.attempt_count == 2
 
+    # Retry 2 (allowed: 2 <= 3)
+    WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=3)
+    WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)
+    assert task.attempt_count == 3
 
-def test_task_retry_exhaustion_guard():
-    task = TaskExecution(workflow_execution_id="exec-1", task_key="task_d", agent_id="agent_1")
-    task.attempt_count = 3  # already at max retries
-    task.status = TaskExecutionStatus.RUNNING
+    # Retry 3 (allowed: 3 <= 3)
+    WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=3)
+    WorkflowStateMachine.transition_task(task, TaskCommand.DISPATCH)
+    assert task.attempt_count == 4
 
-    # Invariant: Cannot retry beyond max_retries
+    # 4th retry rejected (4 > 3)
     with pytest.raises(StateTransitionError, match="Retry limit exhausted"):
         WorkflowStateMachine.transition_task(task, TaskCommand.RETRY, max_retries=3)
 
@@ -192,7 +237,7 @@ def test_invalid_task_transition_rejected():
 
 
 # =============================================================================
-# 3. DAG DEPENDENCY VALIDATION & TOPOLOGICAL RESOLUTION TESTS
+# 4. DAG DEPENDENCY VALIDATION & TOPOLOGICAL RESOLUTION TESTS
 # =============================================================================
 
 def test_valid_dag_topological_sort():
