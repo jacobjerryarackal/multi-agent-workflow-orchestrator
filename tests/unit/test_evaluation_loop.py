@@ -354,3 +354,203 @@ async def test_evaluation_failure_cascades_to_downstream_tasks(db_session):
     assert "EVALUATION_STARTED" in event_types
     assert "EVALUATION_COMPLETED" in event_types
     assert "EVALUATION_FAILED" in event_types
+
+
+# =============================================================================
+# 5. ADVERSARIAL INVARIANT & ISOLATION TESTS
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_attempt_count_vs_revision_count_independence(db_session):
+    """
+    Explicitly proves that attempt_count (retries) and revision_count (quality revisions)
+    are strictly independent counters and are never incremented by the wrong subsystem.
+    """
+    agent = MockRevisionAwareAgent()
+    registry = AgentRegistry()
+    registry.register(agent)
+
+    # Sequence: 1st eval REQUIRES_REVISION -> 2nd eval PASS
+    evaluator = MockEvaluator([
+        (EvaluationVerdict.REQUIRES_REVISION, 0.5, "Needs more detail"),
+        (EvaluationVerdict.PASS, 0.95, "Approved"),
+    ])
+
+    engine = WorkflowExecutionEngine(
+        workflow_repo=SqlWorkflowRepository(db_session),
+        execution_repo=SqlExecutionRepository(db_session),
+        event_repo=SqlEventRepository(db_session),
+        artifact_repo=SqlArtifactRepository(db_session),
+        agent_registry=registry,
+        evaluator=evaluator,
+    )
+
+    tasks = [
+        TaskSpec(
+            task_key="independent_counters_task",
+            name="Counter Independence Test",
+            agent_id="revision_aware_agent",
+            evaluation_gate=EvaluationGateSpec(enabled=True, max_revisions=2, min_pass_score=0.8),
+        )
+    ]
+    wf_spec = WorkflowSpec(name="counter_test_wf", version=1, description="Counter Test", input_schema={}, output_schema={}, tasks=tasks)
+    saved_wf = await engine.workflow_repo.save_workflow_spec(wf_spec)
+    await db_session.commit()
+
+    execution = await engine.submit_workflow(saved_wf.id, {})
+    await db_session.commit()
+
+    final_exec = await engine.run_to_completion(execution.id)
+    await db_session.commit()
+
+    task = final_exec.tasks["independent_counters_task"]
+    assert task.status == TaskExecutionStatus.COMPLETED
+    # 2 execution claims: initial attempt (1) + revision attempt (2)
+    assert task.attempt_count == 2
+    # Exactly 1 revision requested & executed
+    assert task.revision_count == 1
+    assert len(task.evaluation_history) == 2
+
+
+@pytest.mark.asyncio
+async def test_downstream_task_isolated_during_revision_until_pass(db_session):
+    """
+    Verifies that a downstream task remains blocked and CANNOT receive or observe
+    unapproved intermediate revisions until the upstream task receives a PASS verdict.
+    """
+    agent = MockRevisionAwareAgent()
+    registry = AgentRegistry()
+    registry.register(agent)
+
+    evaluator = MockEvaluator([
+        (EvaluationVerdict.REQUIRES_REVISION, 0.4, "Draft incomplete"),
+        (EvaluationVerdict.PASS, 0.95, "Draft accepted"),
+    ])
+
+    engine = WorkflowExecutionEngine(
+        workflow_repo=SqlWorkflowRepository(db_session),
+        execution_repo=SqlExecutionRepository(db_session),
+        event_repo=SqlEventRepository(db_session),
+        artifact_repo=SqlArtifactRepository(db_session),
+        agent_registry=registry,
+        evaluator=evaluator,
+    )
+
+    tasks = [
+        TaskSpec(
+            task_key="upstream_author",
+            name="Upstream Author",
+            agent_id="revision_aware_agent",
+            evaluation_gate=EvaluationGateSpec(enabled=True, max_revisions=2),
+        ),
+        TaskSpec(
+            task_key="downstream_consumer",
+            name="Downstream Consumer",
+            agent_id="revision_aware_agent",
+            depends_on=["upstream_author"],
+            input_mappings={"upstream_content": "upstream_author.content"},
+        ),
+    ]
+    wf_spec = WorkflowSpec(name="isolation_wf", version=1, description="Isolation Test", input_schema={}, output_schema={}, tasks=tasks)
+    saved_wf = await engine.workflow_repo.save_workflow_spec(wf_spec)
+    await db_session.commit()
+
+    execution = await engine.submit_workflow(saved_wf.id, {})
+    await db_session.commit()
+
+    final_exec = await engine.run_to_completion(execution.id)
+    await db_session.commit()
+
+    assert final_exec.status == WorkflowExecutionStatus.COMPLETED
+    assert final_exec.tasks["upstream_author"].status == TaskExecutionStatus.COMPLETED
+    assert final_exec.tasks["downstream_consumer"].status == TaskExecutionStatus.COMPLETED
+
+    # Downstream consumer executed with the final revised content, never unapproved draft
+    downstream_input = final_exec.tasks["downstream_consumer"].input_data
+    assert downstream_input.get("upstream_content") == "High quality revised output"
+
+
+@pytest.mark.asyncio
+async def test_corrupted_artifact_integrity_blocks_evaluation_and_fails_task(db_session):
+    """
+    Verifies that an agent producing a corrupt/tampered artifact is aborted immediately
+    due to SHA-256 verification failure BEFORE evaluation or downstream consumption.
+    """
+    class CorruptArtifactAgent(AbstractAgent):
+        def __init__(self):
+            pass
+
+        @property
+        def metadata(self):
+            return AgentMetadata(
+                agent_id="corrupt_artifact_agent",
+                name="Corrupt Artifact Agent",
+                version="1.0.0",
+                description="Agent emitting bad checksum",
+                capabilities=[AgentCapability.DATA_ANALYSIS],
+                system_instruction="",
+            )
+
+        @property
+        def input_schema(self):
+            from pydantic import BaseModel
+            return BaseModel
+
+        @property
+        def output_schema(self):
+            from pydantic import BaseModel
+            return BaseModel
+
+        def build_prompt(self, context, validated_input):
+            return ""
+
+        async def execute(self, context):
+            bad_artifact = ProducedArtifact(
+                name="corrupted.txt",
+                artifact_type="text",
+                content_or_uri="Hello corrupted world",
+                checksum_sha256="0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            return AgentResult(
+                success=True,
+                structured_data={"status": "done"},
+                artifacts=[bad_artifact],
+            )
+
+    registry = AgentRegistry()
+    registry.register(CorruptArtifactAgent())
+
+    evaluator = MockEvaluator([(EvaluationVerdict.PASS, 1.0, "Pass")])
+
+    engine = WorkflowExecutionEngine(
+        workflow_repo=SqlWorkflowRepository(db_session),
+        execution_repo=SqlExecutionRepository(db_session),
+        event_repo=SqlEventRepository(db_session),
+        artifact_repo=SqlArtifactRepository(db_session),
+        agent_registry=registry,
+        evaluator=evaluator,
+    )
+
+    tasks = [
+        TaskSpec(
+            task_key="corrupt_task",
+            name="Corrupt Task",
+            agent_id="corrupt_artifact_agent",
+            evaluation_gate=EvaluationGateSpec(enabled=True),
+        )
+    ]
+    wf_spec = WorkflowSpec(name="corrupt_wf", version=1, description="Corrupt Test", input_schema={}, output_schema={}, tasks=tasks)
+    saved_wf = await engine.workflow_repo.save_workflow_spec(wf_spec)
+    await db_session.commit()
+
+    execution = await engine.submit_workflow(saved_wf.id, {})
+    await db_session.commit()
+
+    final_exec = await engine.run_to_completion(execution.id)
+    await db_session.commit()
+
+    assert final_exec.status == WorkflowExecutionStatus.FAILED
+    assert final_exec.tasks["corrupt_task"].status == TaskExecutionStatus.FAILED
+    # Evaluator was NEVER called because artifact verification failed first
+    assert len(evaluator.requests) == 0
+

@@ -231,3 +231,88 @@ async def test_composite_evaluator_deterministic_pass_proceeds_to_llm():
     assert result.score == 0.92
     assert "required_field_data" in result.passed_checks
     assert "semantic_depth" in result.passed_checks
+
+
+# =============================================================================
+# 4. ADVERSARIAL EDGE CASE TESTS FOR SEMANTIC & COMPOSITE EVALUATION
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_gemini_semantic_evaluator_valid_escalate():
+    """Evaluator can emit ESCALATE verdict for high-risk output."""
+    schema = LLMEvaluationSchema(
+        verdict=EvaluationVerdict.ESCALATE,
+        score=0.2,
+        rationale="Output contains potentially unsafe automated instructions.",
+        passed_checks=[],
+        failed_checks=["safety_guidelines"],
+        actionable_feedback="Requires human operator sign-off.",
+    )
+    provider = MockProviderSuccess(schema)
+    evaluator = GeminiSemanticEvaluator(provider)
+
+    request = EvaluationRequest(
+        workflow_execution_id="w-1",
+        task_key="t1",
+        agent_id="analyst",
+        output_payload={"code": "os.system('dangerous')"},
+    )
+    result = await evaluator.evaluate(request)
+    assert result.verdict == EvaluationVerdict.ESCALATE
+    assert result.score == 0.2
+    assert "human operator" in (result.actionable_feedback or "")
+
+
+@pytest.mark.asyncio
+async def test_gemini_semantic_evaluator_requires_revision_with_high_score_respects_verdict():
+    """If LLM emits REQUIRES_REVISION despite score >= min_pass_score, gate enforces REQUIRES_REVISION."""
+    schema = LLMEvaluationSchema(
+        verdict=EvaluationVerdict.REQUIRES_REVISION,
+        score=0.85,  # Above min_pass_score=0.80
+        rationale="Scores high overall but lacks key architectural requirement.",
+        passed_checks=["formatting"],
+        failed_checks=["architecture_spec"],
+        actionable_feedback="Include architecture spec.",
+    )
+    provider = MockProviderSuccess(schema)
+    evaluator = GeminiSemanticEvaluator(provider)
+
+    request = EvaluationRequest(
+        workflow_execution_id="w-1",
+        task_key="t1",
+        agent_id="planner",
+        output_payload={"plan": "Step 1"},
+        min_pass_score=0.8,
+        current_revision=0,
+        max_revisions=2,
+    )
+    result = await evaluator.evaluate(request)
+    assert result.verdict == EvaluationVerdict.REQUIRES_REVISION
+    assert result.score == 0.85
+
+
+@pytest.mark.asyncio
+async def test_composite_evaluator_deterministic_failure_call_counter_zero():
+    """Proves with a strict call counter that Layer 2 LLM provider is never called on Layer 1 failure."""
+    class CountingProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_structured(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("Model provider should never be called when Layer 1 fails!")
+
+    counting_provider = CountingProvider()
+    evaluator = CompositeQualityEvaluator(model_provider=counting_provider)  # type: ignore
+
+    request = EvaluationRequest(
+        workflow_execution_id="w-1",
+        task_key="t1",
+        agent_id="researcher",
+        output_payload={},  # Empty payload triggers Layer 1 failure
+        evaluation_criteria={"required_fields": ["summary"]},
+    )
+    result = await evaluator.evaluate(request)
+    assert result.verdict == EvaluationVerdict.REQUIRES_REVISION
+    assert counting_provider.calls == 0
+
