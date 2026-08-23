@@ -22,6 +22,16 @@ class CyclicDependencyError(WorkflowValidationError):
     pass
 
 
+class WorkflowNotFoundError(OrchestratorException):
+    """Raised when a workflow specification or execution record is not found."""
+    pass
+
+
+class WorkflowExecutionError(OrchestratorException):
+    """Raised when a workflow execution encounters an unrecoverable engine error."""
+    pass
+
+
 class AgentNotFoundError(OrchestratorException):
     """Raised when a workflow references an agent not present in the registry."""
     pass
