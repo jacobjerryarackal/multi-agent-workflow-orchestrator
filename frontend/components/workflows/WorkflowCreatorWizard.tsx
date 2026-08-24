@@ -146,6 +146,69 @@ export function WorkflowCreatorWizard() {
     setTasks(updated);
   };
 
+  const validateTasks = (taskList: TaskSpecSchema[]): string | null => {
+    if (taskList.length === 0) return "At least one task node is required in the workflow.";
+    const keySet = new Set<string>();
+    for (let i = 0; i < taskList.length; i++) {
+      const t = taskList[i];
+      const key = t.task_key.trim();
+      if (!key) return `Task #${i + 1} must have a non-empty task key.`;
+      if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
+        return `Task key '${key}' contains invalid characters. Use alphanumeric characters, dashes, or underscores.`;
+      }
+      if (keySet.has(key)) {
+        return `Duplicate task key '${key}'. All task keys in the DAG must be unique.`;
+      }
+      keySet.add(key);
+
+      if (!t.name.trim()) return `Task '${key}' must have a descriptive name.`;
+      if (t.depends_on.includes(key)) {
+        return `Task '${key}' cannot depend on itself.`;
+      }
+    }
+
+    // Cyclic dependency detection (DFS)
+    const graph = new Map<string, string[]>();
+    taskList.forEach((t) => graph.set(t.task_key, t.depends_on));
+    const visited = new Set<string>();
+    const recStack = new Set<string>();
+
+    function hasCycle(node: string): boolean {
+      visited.add(node);
+      recStack.add(node);
+      const neighbors = graph.get(node) || [];
+      for (const neighbor of neighbors) {
+        if (!visited.has(neighbor)) {
+          if (hasCycle(neighbor)) return true;
+        } else if (recStack.has(neighbor)) {
+          return true;
+        }
+      }
+      recStack.delete(node);
+      return false;
+    }
+
+    for (const node of Array.from(graph.keys())) {
+      if (!visited.has(node)) {
+        if (hasCycle(node)) {
+          return "Cyclic dependency detected in task graph. Workflow DAG must be acyclic.";
+        }
+      }
+    }
+
+    return null;
+  };
+
+  const handleProceedToReview = () => {
+    const taskError = validateTasks(tasks);
+    if (taskError) {
+      setError(taskError);
+      return;
+    }
+    setError(null);
+    setStep(3);
+  };
+
   const handleSubmit = async () => {
     setError(null);
     if (!name.trim()) {
@@ -156,6 +219,13 @@ export function WorkflowCreatorWizard() {
     if (!description.trim()) {
       setError("Workflow description is required.");
       setStep(1);
+      return;
+    }
+
+    const taskError = validateTasks(tasks);
+    if (taskError) {
+      setError(taskError);
+      setStep(2);
       return;
     }
 
@@ -499,7 +569,7 @@ export function WorkflowCreatorWizard() {
               <ArrowLeft className="w-3.5 h-3.5" />
               Back to Metadata
             </Button>
-            <Button variant="primary" size="sm" onClick={() => setStep(3)}>
+            <Button variant="primary" size="sm" onClick={handleProceedToReview}>
               Review Specification
               <ArrowRight className="w-3.5 h-3.5" />
             </Button>

@@ -57,6 +57,14 @@ export function WorkflowDAGView({
     return cols;
   }, [tasks]);
 
+  if (!tasks || tasks.length === 0) {
+    return (
+      <div className="w-full rounded-lg border border-zinc-800 bg-zinc-950/70 p-8 text-center text-xs text-zinc-500 font-mono-data">
+        No task nodes defined in this workflow DAG.
+      </div>
+    );
+  }
+
   return (
     <div className="w-full rounded-lg border border-zinc-800 bg-zinc-950/70 p-6 overflow-x-auto">
       <div className="flex items-center justify-between mb-4 pb-2 border-b border-zinc-800/80 text-xs font-mono-data text-zinc-400">

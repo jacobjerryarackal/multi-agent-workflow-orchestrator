@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -10,6 +10,7 @@ import {
   Bot,
   Server,
   Layers,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 
@@ -49,24 +50,47 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
-export function Sidebar() {
+export interface SidebarProps {
+  isMobileOpen?: boolean;
+  onCloseMobile?: () => void;
+}
+
+export function Sidebar({ isMobileOpen = false, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
 
-  return (
-    <aside className="w-60 border-r border-zinc-800 bg-zinc-950 flex flex-col shrink-0 h-screen sticky top-0">
+  // Close mobile drawer on route change
+  useEffect(() => {
+    onCloseMobile?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  const navContent = (
+    <div className="flex flex-col h-full bg-zinc-950 text-zinc-100">
       {/* Brand Header */}
-      <div className="h-14 px-4 border-b border-zinc-800 flex items-center gap-2.5">
-        <div className="w-7 h-7 rounded bg-zinc-900 border border-zinc-700 flex items-center justify-center text-zinc-100 font-semibold shadow-inner">
-          <Layers className="w-4 h-4 text-zinc-300" />
+      <div className="h-14 px-4 border-b border-zinc-800 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded bg-zinc-900 border border-zinc-700 flex items-center justify-center text-zinc-100 font-semibold shadow-inner">
+            <Layers className="w-4 h-4 text-zinc-300" />
+          </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-semibold text-zinc-100 tracking-tight truncate">
+              Workflow Orchestrator
+            </span>
+            <span className="text-[10px] font-mono-data text-zinc-500 uppercase tracking-wider">
+              Multi-Agent Engine
+            </span>
+          </div>
         </div>
-        <div className="flex flex-col min-w-0">
-          <span className="text-xs font-semibold text-zinc-100 tracking-tight truncate">
-            Workflow Orchestrator
-          </span>
-          <span className="text-[10px] font-mono-data text-zinc-500 uppercase tracking-wider">
-            Multi-Agent Engine
-          </span>
-        </div>
+
+        {onCloseMobile ? (
+          <button
+            onClick={onCloseMobile}
+            className="md:hidden p-1 rounded text-zinc-400 hover:text-white"
+            aria-label="Close sidebar"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        ) : null}
       </div>
 
       {/* Navigation */}
@@ -84,6 +108,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={onCloseMobile}
               className={cn(
                 "flex items-center gap-2.5 px-2.5 py-2 rounded text-xs font-medium transition-colors select-none group",
                 isActive
@@ -115,6 +140,30 @@ export function Sidebar() {
           <span className="text-zinc-500 text-[10px]">v1.0.0</span>
         </div>
       </div>
-    </aside>
+    </div>
+  );
+
+  return (
+    <>
+      {/* Desktop Persistent Sidebar */}
+      <aside className="hidden md:flex w-60 border-r border-zinc-800 shrink-0 h-screen sticky top-0 z-30">
+        {navContent}
+      </aside>
+
+      {/* Mobile Slide-over Drawer */}
+      {isMobileOpen ? (
+        <div
+          className="fixed inset-0 z-50 md:hidden bg-black/80 backdrop-blur-sm animate-in fade-in duration-150 flex"
+          onClick={onCloseMobile}
+        >
+          <div
+            className="w-64 max-w-[80vw] h-full border-r border-zinc-800 shadow-2xl animate-in slide-in-from-left duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {navContent}
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

@@ -4,10 +4,14 @@ import React, { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSystemHealth } from "@/lib/api/health";
 import { Badge } from "@/components/ui/Badge";
-import { Database, Cpu, ShieldCheck } from "lucide-react";
+import { Database, Cpu, Menu } from "lucide-react";
 import { HealthResponse } from "@/lib/types/api";
 
-export function Header() {
+export interface HeaderProps {
+  onToggleMobileMenu?: () => void;
+}
+
+export function Header({ onToggleMobileMenu }: HeaderProps) {
   const pathname = usePathname();
   const [health, setHealth] = useState<HealthResponse | null>(null);
 
@@ -36,19 +40,31 @@ export function Header() {
   };
 
   return (
-    <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur px-6 flex items-center justify-between shrink-0 sticky top-0 z-30">
+    <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur px-4 sm:px-6 flex items-center justify-between shrink-0 sticky top-0 z-30">
       <div className="flex items-center gap-3">
-        <span className="text-xs font-mono-data text-zinc-500 uppercase">
+        {onToggleMobileMenu ? (
+          <button
+            onClick={onToggleMobileMenu}
+            className="md:hidden p-1.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-800"
+            aria-label="Open navigation menu"
+          >
+            <Menu className="w-4 h-4" />
+          </button>
+        ) : null}
+
+        <span className="hidden sm:inline text-xs font-mono-data text-zinc-500 uppercase">
           CLUSTER
         </span>
-        <span className="text-zinc-600">/</span>
-        <span className="text-xs font-medium text-zinc-200">{getBreadcrumb()}</span>
+        <span className="hidden sm:inline text-zinc-600">/</span>
+        <span className="text-xs font-medium text-zinc-200 truncate max-w-[160px] sm:max-w-none">
+          {getBreadcrumb()}
+        </span>
       </div>
 
-      <div className="flex items-center gap-4 text-xs font-mono-data">
+      <div className="flex items-center gap-3 text-xs font-mono-data">
         {health ? (
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-zinc-400">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="hidden lg:flex items-center gap-1.5 text-zinc-400">
               <Database className="w-3.5 h-3.5 text-zinc-400" />
               <span>
                 PG 16:{" "}
@@ -64,7 +80,7 @@ export function Header() {
               </span>
             </div>
 
-            <div className="flex items-center gap-1.5 text-zinc-400">
+            <div className="hidden sm:flex items-center gap-1.5 text-zinc-400">
               <Cpu className="w-3.5 h-3.5 text-zinc-400" />
               <span>
                 Agents:{" "}

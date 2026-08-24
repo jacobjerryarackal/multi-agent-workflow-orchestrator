@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { AgentSummaryResponse } from "@/lib/types/api";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { CodeBlock } from "@/components/ui/CodeBlock";
-import { Bot, Code2, Cpu, CheckCircle } from "lucide-react";
+import { Bot, Code2, Cpu, ArrowRight } from "lucide-react";
 
 export interface AgentCardProps {
   agent: AgentSummaryResponse;
@@ -27,8 +28,13 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <Bot className="w-4 h-4" />
               </div>
               <div>
-                <CardTitle className="text-sm text-zinc-100">{agent.name}</CardTitle>
-                <span className="text-[11px] font-mono-data text-zinc-500">
+                <Link
+                  href={`/agents/${agent.agent_id}`}
+                  className="text-sm font-semibold text-zinc-100 hover:text-white hover:underline line-clamp-1"
+                >
+                  {agent.name}
+                </Link>
+                <span className="text-[11px] font-mono-data text-zinc-500 block">
                   {agent.agent_id}
                 </span>
               </div>
@@ -53,18 +59,26 @@ export function AgentCard({ agent }: AgentCardProps) {
           <div className="flex items-center justify-between pt-3 border-t border-zinc-800/60 text-xs">
             <div className="flex items-center gap-1.5 font-mono-data text-zinc-400 text-[11px]">
               <Cpu className="w-3 h-3 text-zinc-500" />
-              <span>Gemini 2.5 Flash</span>
+              <span>Gemini Provider</span>
             </div>
 
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setIsSchemaModalOpen(true)}
-              className="h-7 text-[11px]"
-            >
-              <Code2 className="w-3 h-3" />
-              Contracts
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsSchemaModalOpen(true)}
+                className="h-7 text-[11px]"
+              >
+                <Code2 className="w-3 h-3" />
+                Modal
+              </Button>
+              <Link href={`/agents/${agent.agent_id}`}>
+                <Button variant="secondary" size="sm" className="h-7 text-[11px]">
+                  Spec
+                  <ArrowRight className="w-3 h-3" />
+                </Button>
+              </Link>
+            </div>
           </div>
         </CardContent>
       </Card>
