@@ -200,6 +200,7 @@ class WorkflowExecutionEngine:
             if elapsed_seconds > workflow.max_workflow_duration_seconds:
                 async with self._db_lock:
                     WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.TIMEOUT)
+                    # pyrefly: ignore [deprecated]
                     execution.completed_at = datetime.utcnow()
                     execution.error_summary = f"Workflow exceeded maximum duration of {workflow.max_workflow_duration_seconds}s."
                     await self.execution_repo.update_workflow_execution(execution)
@@ -369,6 +370,7 @@ class WorkflowExecutionEngine:
         task_exec.output_data = result.structured_data
         task_exec.token_usage = result.token_metrics.model_dump()
         task_exec.execution_duration_ms = result.execution_duration_ms
+        # pyrefly: ignore [deprecated]
         task_exec.completed_at = datetime.utcnow()
 
         # 1. Persist and verify produced artifacts
@@ -648,6 +650,7 @@ class WorkflowExecutionEngine:
 
         # Retries exhausted or non-retryable -> mark FAILED
         WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
+        # pyrefly: ignore [deprecated]
         task_exec.completed_at = datetime.utcnow()
         async with self._db_lock:
             await self.execution_repo.update_task_execution(task_exec)
@@ -712,6 +715,7 @@ class WorkflowExecutionEngine:
 
         if is_all_completed:
             WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.COMPLETE)
+            # pyrefly: ignore [deprecated]
             execution.completed_at = datetime.utcnow()
             
             # Aggregate final outputs from leaf nodes
@@ -731,6 +735,7 @@ class WorkflowExecutionEngine:
             logger.info("Workflow execution completed successfully", execution_id=execution.id)
         elif has_any_failed:
             WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.FAIL)
+            # pyrefly: ignore [deprecated]
             execution.completed_at = datetime.utcnow()
             execution.error_summary = "One or more critical tasks failed unrecoverably."
             async with self._db_lock:
