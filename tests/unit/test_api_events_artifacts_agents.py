@@ -1,5 +1,4 @@
-"""Unit tests for Events, Artifacts, and Agents API endpoints."""
-
+import asyncio
 import pytest
 import pytest_asyncio
 from typing import AsyncGenerator
@@ -61,6 +60,13 @@ async def test_list_audit_events_for_execution(client: AsyncClient):
         json={"input_data": {"objective": "Plan audit events"}},
     )
     exec_id = exec_res.json()["id"]
+
+    # Poll until background execution completes
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+        if detail_res.json()["status"] == "COMPLETED":
+            break
 
     # 2. Query events
     events_res = await client.get(f"/api/v1/executions/{exec_id}/events")

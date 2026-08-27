@@ -1,5 +1,4 @@
-"""Unit tests for Execution API endpoints."""
-
+import asyncio
 import pytest
 import pytest_asyncio
 from typing import AsyncGenerator
@@ -142,11 +141,22 @@ async def test_submit_and_run_workflow_execution(client: AsyncClient):
     exec_res = await client.post(f"/api/v1/workflows/{wf_id}/executions", json=exec_payload)
     assert exec_res.status_code == 201
     exec_data = exec_res.json()
-    assert exec_data["status"] == "COMPLETED"
-    assert len(exec_data["tasks"]) == 2
-    assert all(t["status"] == "COMPLETED" for t in exec_data["tasks"])
-
+    assert exec_data["status"] in ("QUEUED", "RUNNING")
     exec_id = exec_data["id"]
+
+    # Poll until background execution reaches terminal COMPLETED state
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+        if detail_res.json()["status"] == "COMPLETED":
+            break
+
+    detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+    assert detail_res.status_code == 200
+    detail_data = detail_res.json()
+    assert detail_data["status"] == "COMPLETED"
+    assert len(detail_data["tasks"]) == 2
+    assert all(t["status"] == "COMPLETED" for t in detail_data["tasks"])
 
     # 3. Test Idempotency (submitting same idempotency key returns existing execution)
     dup_res = await client.post(f"/api/v1/workflows/{wf_id}/executions", json=exec_payload)
@@ -191,6 +201,13 @@ async def test_cancel_execution(client: AsyncClient):
     )
     exec_id = exec_res.json()["id"]
 
+    # Wait for completion
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+        if detail_res.json()["status"] == "COMPLETED":
+            break
+
     # 3. Trying to cancel completed execution should return 409 (Conflict / Invalid State Transition)
     cancel_res = await client.post(f"/api/v1/executions/{exec_id}/cancel")
     assert cancel_res.status_code == 409
@@ -222,16 +239,24 @@ async def test_approval_gate_endpoints(client: AsyncClient):
     wf_res = await client.post("/api/v1/workflows", json=wf_payload)
     wf_id = wf_res.json()["id"]
 
-    # 2. Submit execution (pauses in WAITING_APPROVAL)
+    # 2. Submit execution
     exec_res = await client.post(
         f"/api/v1/workflows/{wf_id}/executions",
         json={"input_data": {"objective": "Formulate blueprint"}},
     )
     assert exec_res.status_code == 201
-    exec_data = exec_res.json()
-    exec_id = exec_data["id"]
+    exec_id = exec_res.json()["id"]
 
-    task = next(t for t in exec_data["tasks"] if t["task_key"] == "planning_gate")
+    # Wait until execution reaches WAITING_APPROVAL
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+        task = next((t for t in detail_res.json()["tasks"] if t["task_key"] == "planning_gate"), None)
+        if task and task["status"] == "WAITING_APPROVAL":
+            break
+
+    detail_res = await client.get(f"/api/v1/executions/{exec_id}")
+    task = next(t for t in detail_res.json()["tasks"] if t["task_key"] == "planning_gate")
     assert task["status"] == "WAITING_APPROVAL"
 
     # 3. Approve the task

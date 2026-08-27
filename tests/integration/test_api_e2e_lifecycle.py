@@ -1,5 +1,4 @@
-"""End-to-End API Integration test validating complete multi-agent workflow lifecycle on PostgreSQL."""
-
+import asyncio
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -24,6 +23,11 @@ async def pg_api_client():
 
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
+    from app.orchestration.background_manager import get_background_manager
+    bg_manager = get_background_manager()
+    old_factory = bg_manager._session_factory
+    bg_manager._session_factory = session_factory
+
     app = create_app()
 
     async def override_get_db_session():
@@ -44,6 +48,8 @@ async def pg_api_client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client
+
+    bg_manager._session_factory = old_factory
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -113,7 +119,7 @@ async def test_full_api_multi_agent_lifecycle_postgres(pg_api_client: AsyncClien
     assert create_wf_res.status_code == 201
     workflow_id = create_wf_res.json()["id"]
 
-    # 4. Submit Execution
+    # 4. Submit Execution (Returns HTTP 201 immediately with status QUEUED or RUNNING)
     submit_res = await client.post(
         f"/api/v1/workflows/{workflow_id}/executions",
         json={
@@ -124,17 +130,23 @@ async def test_full_api_multi_agent_lifecycle_postgres(pg_api_client: AsyncClien
     )
     assert submit_res.status_code == 201
     exec_data = submit_res.json()
-    assert exec_data["status"] == "COMPLETED"
-    assert len(exec_data["tasks"]) == 3
-    assert all(t["status"] == "COMPLETED" for t in exec_data["tasks"])
-
+    assert exec_data["status"] in ("QUEUED", "RUNNING")
     execution_id = exec_data["id"]
+
+    # Poll until background execution completes
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        detail_res = await client.get(f"/api/v1/executions/{execution_id}")
+        if detail_res.json()["status"] == "COMPLETED":
+            break
 
     # 5. Retrieve Execution Detail
     detail_res = await client.get(f"/api/v1/executions/{execution_id}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
     assert detail["status"] == "COMPLETED"
+    assert len(detail["tasks"]) == 3
+    assert all(t["status"] == "COMPLETED" for t in detail["tasks"])
     assert "planner_node" in detail["final_outputs"]
     assert "researcher_node" in detail["final_outputs"]
     assert "synthesizer_node" in detail["final_outputs"]

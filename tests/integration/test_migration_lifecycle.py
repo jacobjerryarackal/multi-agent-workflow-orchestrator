@@ -19,7 +19,7 @@ async def test_complete_migration_lifecycle():
         await conn.execute(text("CREATE SCHEMA public"))
     await engine.dispose()
 
-    # 2. Upgrade from clean database to head (Applies v001 + v002)
+    # 2. Upgrade from clean database to head (Applies v001 + v002 + v003)
     proc_up1 = subprocess.run(
         ["alembic", "upgrade", "head"],
         cwd="backend",
@@ -35,7 +35,7 @@ async def test_complete_migration_lifecycle():
         capture_output=True,
         text=True,
     )
-    assert "v002_evaluation_support" in proc_curr.stdout
+    assert "v003_task_leases" in proc_curr.stdout
 
     # 4. Verify PostgreSQL tables and columns
     engine = create_async_engine(POSTGRES_TEST_URL, echo=False)
@@ -48,16 +48,19 @@ async def test_complete_migration_lifecycle():
         for tbl in expected_tables:
             assert tbl in tables, f"Missing table: {tbl}"
 
-        # Check task_executions columns (Phase 5 additions)
+        # Check task_executions columns (Phase 5 + Phase 7.1 additions)
         cols_res = await conn.execute(
             text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'task_executions'")
         )
         cols = {row[0]: row[1] for row in cols_res.fetchall()}
         assert "revision_count" in cols
         assert "evaluation_history" in cols
+        assert "lease_until" in cols
+        assert "heartbeat_at" in cols
+        assert "leased_by" in cols
     await engine.dispose()
 
-    # 5. Test alembic downgrade base (Rolls back v002 + v001 to empty)
+    # 5. Test alembic downgrade base (Rolls back v003 + v002 + v001 to empty)
     proc_down_base = subprocess.run(
         ["alembic", "downgrade", "base"],
         cwd="backend",
@@ -76,7 +79,7 @@ async def test_complete_migration_lifecycle():
         assert len(remaining_tables) == 0, f"Tables remaining after downgrade base: {remaining_tables}"
     await engine.dispose()
 
-    # 6. Test alembic upgrade head again (Re-applies v001 + v002 from base)
+    # 6. Test alembic upgrade head again (Re-applies v001 + v002 + v003 from base)
     proc_up2 = subprocess.run(
         ["alembic", "upgrade", "head"],
         cwd="backend",
@@ -85,7 +88,7 @@ async def test_complete_migration_lifecycle():
     )
     assert proc_up2.returncode == 0, f"alembic re-upgrade head failed: {proc_up2.stderr}"
 
-    # 7. Test alembic downgrade -1 (v002 -> v001)
+    # 7. Test alembic downgrade -1 (v003 -> v002)
     proc_down1 = subprocess.run(
         ["alembic", "downgrade", "-1"],
         cwd="backend",
@@ -94,17 +97,18 @@ async def test_complete_migration_lifecycle():
     )
     assert proc_down1.returncode == 0, f"alembic downgrade -1 failed: {proc_down1.stderr}"
 
-    # Verify column evaluation_history was dropped
+    # Verify column lease_until was dropped
     engine = create_async_engine(POSTGRES_TEST_URL, echo=False)
     async with engine.begin() as conn:
         cols_res = await conn.execute(
             text("SELECT column_name FROM information_schema.columns WHERE table_name = 'task_executions'")
         )
         cols = [row[0] for row in cols_res.fetchall()]
-        assert "evaluation_history" not in cols
+        assert "lease_until" not in cols
+        assert "evaluation_history" in cols
     await engine.dispose()
 
-    # 8. Re-upgrade to head (v001 -> v002)
+    # 8. Re-upgrade to head (v002 -> v003)
     proc_up3 = subprocess.run(
         ["alembic", "upgrade", "head"],
         cwd="backend",
@@ -120,6 +124,7 @@ async def test_complete_migration_lifecycle():
             text("SELECT column_name FROM information_schema.columns WHERE table_name = 'task_executions'")
         )
         cols = [row[0] for row in cols_res.fetchall()]
+        assert "lease_until" in cols
         assert "evaluation_history" in cols
         assert "revision_count" in cols
     await engine.dispose()

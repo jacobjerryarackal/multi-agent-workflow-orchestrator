@@ -68,11 +68,10 @@ async def test_application_factory_and_root_endpoint(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_startup_shutdown():
+async def test_lifespan_startup_shutdown(app_instance: FastAPI):
     """Verifies that lifespan startup and shutdown context manager executes cleanly."""
-    app = create_app()
-    async with lifespan(app):
-        assert app.title == "Multi-Agent Workflow Orchestrator API"
+    async with lifespan(app_instance):
+        assert app_instance.title == "Multi-Agent Workflow Orchestrator API"
 
 
 # =============================================================================

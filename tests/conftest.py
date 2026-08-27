@@ -90,15 +90,29 @@ def sample_workflow_spec(sample_task_spec: TaskSpec) -> WorkflowSpec:
 async def db_session():
     """Provides an isolated in-memory SQLite database session for unit and engine tests."""
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    from sqlalchemy.pool import StaticPool
     from app.persistence.database import Base
+    from app.orchestration.background_manager import get_background_manager
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    bg_manager = get_background_manager()
+    bg_manager._shutdown_event.clear()
+    old_factory = bg_manager._session_factory
+    bg_manager._session_factory = session_factory
+
     async with session_factory() as session:
         yield session
 
+    bg_manager._session_factory = old_factory
+    bg_manager._shutdown_event.clear()
     await engine.dispose()
 
