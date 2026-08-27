@@ -140,13 +140,14 @@ class WorkflowExecutionEngine:
             # 5. Persist workflow execution
             saved_execution = await self.execution_repo.create_workflow_execution(execution)
 
-        # 6. Audit event
-        await self._emit_event(
-            execution_id=saved_execution.id,
-            workflow_id=workflow_id,
-            event_type=EventType.WORKFLOW_STARTED,
-            payload={"initial_inputs": initial_inputs, "task_count": len(workflow.tasks)},
-        )
+        # 6. Audit event (only for newly created execution)
+        if saved_execution.id == execution.id:
+            await self._emit_event(
+                execution_id=saved_execution.id,
+                workflow_id=workflow_id,
+                event_type=EventType.WORKFLOW_STARTED,
+                payload={"initial_inputs": initial_inputs, "task_count": len(workflow.tasks)},
+            )
 
         logger.info(
             "Workflow execution submitted",
