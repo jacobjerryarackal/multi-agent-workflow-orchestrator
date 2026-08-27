@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import List, Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from ...domain.models.execution import (
@@ -21,9 +22,24 @@ class SqlExecutionRepository(ExecutionRepository):
 
     async def create_workflow_execution(self, execution: WorkflowExecution) -> WorkflowExecution:
         model = WorkflowExecutionModel.from_domain(execution)
-        self.session.add(model)
-        await self.session.flush()
-        return model.to_domain()
+        if execution.idempotency_key:
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(model)
+                    await self.session.flush()
+                return model.to_domain()
+            except IntegrityError:
+                # Concurrent race condition: another transaction committed first with this idempotency_key
+                existing = await self.get_workflow_execution_by_idempotency_key(
+                    execution.workflow_id, execution.idempotency_key
+                )
+                if existing:
+                    return existing
+                raise
+        else:
+            self.session.add(model)
+            await self.session.flush()
+            return model.to_domain()
 
     async def get_workflow_execution(self, execution_id: str) -> Optional[WorkflowExecution]:
         stmt = (
