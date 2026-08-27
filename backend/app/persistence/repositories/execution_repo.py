@@ -1,6 +1,5 @@
-"""SQLAlchemy repository implementation for Workflow and Task Executions."""
-
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,12 +114,18 @@ class SqlExecutionRepository(ExecutionRepository):
         return model.to_domain()
 
     async def claim_task_for_execution(
-        self, workflow_execution_id: str, task_key: str
+        self,
+        workflow_execution_id: str,
+        task_key: str,
+        lease_duration_seconds: int = 90,
+        worker_id: Optional[str] = None,
     ) -> Optional[TaskExecution]:
         """
         Atomically claims a READY task for execution using database row-level locking (SELECT FOR UPDATE).
-        Guarantees that exactly one worker can acquire and transition the task to RUNNING.
+        Sets status=RUNNING, increments attempt_count, records started_at, heartbeat_at, and calculates lease_until.
+        Guarantees that exactly one worker can acquire and transition the task.
         """
+        from datetime import datetime, timedelta
         stmt = (
             select(TaskExecutionModel)
             .where(
@@ -135,11 +140,77 @@ class SqlExecutionRepository(ExecutionRepository):
         if not model:
             return None
 
-        from datetime import datetime
+        now = datetime.utcnow()
         model.status = TaskExecutionStatus.RUNNING.value
         model.attempt_count += 1
-        model.started_at = datetime.utcnow()
+        model.started_at = now
+        model.heartbeat_at = now
+        model.lease_until = now + timedelta(seconds=lease_duration_seconds)
+        model.leased_by = worker_id or "async_worker"
 
         await self.session.flush()
         return model.to_domain()
+
+    async def renew_task_lease(
+        self,
+        task_id: str,
+        lease_duration_seconds: int = 90,
+    ) -> bool:
+        """Extends the lease for a currently running task."""
+        from datetime import datetime, timedelta
+        stmt = (
+            select(TaskExecutionModel)
+            .where(
+                TaskExecutionModel.id == task_id,
+                TaskExecutionModel.status == TaskExecutionStatus.RUNNING.value,
+            )
+            .with_for_update()
+        )
+        result = await self.session.execute(stmt)
+        model = result.scalar_one_or_none()
+        if not model:
+            return False
+
+        now = datetime.utcnow()
+        model.heartbeat_at = now
+        model.lease_until = now + timedelta(seconds=lease_duration_seconds)
+        await self.session.flush()
+        return True
+
+    async def find_and_lock_stale_tasks(
+        self,
+        now: Optional[datetime] = None,
+        limit: int = 50,
+    ) -> list[TaskExecutionModel]:
+        """
+        Finds and locks RUNNING tasks whose lease has expired using SELECT FOR UPDATE SKIP LOCKED.
+        Safe for concurrent invocation across multiple worker processes.
+        """
+        from datetime import datetime
+        cutoff = now or datetime.utcnow()
+        stmt = (
+            select(TaskExecutionModel)
+            .where(
+                TaskExecutionModel.status == TaskExecutionStatus.RUNNING.value,
+                TaskExecutionModel.lease_until.is_not(None),
+                TaskExecutionModel.lease_until < cutoff,
+            )
+            .order_by(TaskExecutionModel.lease_until.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_active_workflow_execution_ids(self) -> list[str]:
+        """Returns IDs of workflows currently in QUEUED or RUNNING states."""
+        stmt = select(WorkflowExecutionModel.id).where(
+            WorkflowExecutionModel.status.in_([
+                WorkflowExecutionStatus.QUEUED.value,
+                WorkflowExecutionStatus.RUNNING.value,
+            ])
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
