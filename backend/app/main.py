@@ -11,6 +11,7 @@ from .core.config import Settings, settings
 from .api.errors import register_exception_handlers
 from .api.middleware.correlation import CorrelationIdMiddleware, get_correlation_id
 from .api.middleware.security import SecurityHeadersMiddleware
+from .api.middleware.metrics import HttpMetricsMiddleware
 from .api.v1 import v1_router
 from .persistence.database import engine, Base
 from .persistence.models import (
@@ -76,6 +77,9 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
 
     # Correlation ID middleware
     app.add_middleware(CorrelationIdMiddleware)
+
+    # HTTP Telemetry & Metrics middleware
+    app.add_middleware(HttpMetricsMiddleware)
 
     # CORS Middleware configured from environment
     app.add_middleware(
