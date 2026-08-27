@@ -52,10 +52,10 @@ class ExecutionService:
         input_data: Dict[str, Any],
         idempotency_key: Optional[str] = None,
         trigger_type: str = "api",
-        run_to_completion: bool = True,
+        run_to_completion: bool = False,
     ) -> WorkflowExecution:
         """
-        Submits a workflow for execution and optionally drives it to completion.
+        Submits a workflow for execution and schedules async background execution (or synchronously completes if requested).
         """
         execution = await self.engine.submit_workflow(
             workflow_id=workflow_id,
@@ -69,6 +69,16 @@ class ExecutionService:
             WorkflowExecutionStatus.RUNNING,
         ):
             execution = await self.engine.run_to_completion(execution.id)
+        elif not run_to_completion and execution.status in (
+            WorkflowExecutionStatus.QUEUED,
+            WorkflowExecutionStatus.RUNNING,
+        ):
+            from ..orchestration.background_manager import get_background_manager
+            get_background_manager().schedule_execution(
+                execution_id=execution.id,
+                registry=self.engine.agent_registry,
+                evaluator=self.engine.evaluator,
+            )
 
         return execution
 
