@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     MAX_TASK_RETRIES: int = 3
     MAX_TOTAL_WORKFLOW_STEPS: int = 50
     MAX_OUTPUT_SIZE_BYTES: int = 1_048_576  # 1 MB
+    MAX_REQUEST_SIZE_BYTES: int = 10_485_760  # 10 MB
+
+    # Rate Limiting Configuration (Process-local)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 120
+    RATE_LIMIT_BURST: int = 30
 
     model_config = SettingsConfigDict(
         env_file=".env",
