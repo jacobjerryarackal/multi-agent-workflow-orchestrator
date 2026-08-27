@@ -4,8 +4,8 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
+from sqlalchemy import text
 from app.main import create_app
-from app.persistence.database import Base
 from app.api.dependencies import get_db_session, get_model_provider
 from tests.unit.test_api_executions import get_canned_provider
 
@@ -18,8 +18,7 @@ async def pg_api_client():
     engine = create_async_engine(POSTGRES_TEST_URL, echo=False)
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("TRUNCATE TABLE workflows CASCADE;"))
 
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -52,7 +51,7 @@ async def pg_api_client():
     bg_manager._session_factory = old_factory
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("TRUNCATE TABLE workflows CASCADE;"))
 
     await engine.dispose()
 

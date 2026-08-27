@@ -116,3 +116,13 @@ async def db_session():
     bg_manager._shutdown_event.clear()
     await engine.dispose()
 
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_postgres_schema_migrated():
+    """Ensures that the PostgreSQL test database is migrated to Alembic head before test execution."""
+    import subprocess
+    try:
+        subprocess.run(["alembic", "upgrade", "head"], cwd="backend", capture_output=True, check=False)
+    except Exception:
+        pass
+

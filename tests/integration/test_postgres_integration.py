@@ -37,19 +37,18 @@ POSTGRES_TEST_URL = "postgresql+asyncpg://postgres:12345678@localhost:5432/orche
 
 @pytest_asyncio.fixture
 async def pg_session():
-    """Provides an isolated real PostgreSQL database session with fresh tables."""
+    """Provides an isolated real PostgreSQL database session with clean tables."""
     engine = create_async_engine(POSTGRES_TEST_URL, echo=False)
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("TRUNCATE TABLE workflows CASCADE;"))
 
     session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as session:
         yield session
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("TRUNCATE TABLE workflows CASCADE;"))
 
     await engine.dispose()
 
