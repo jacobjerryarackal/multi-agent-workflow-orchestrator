@@ -55,10 +55,22 @@ async def check_system_health(
 
     # 1. Database Connectivity Check
     try:
+        from ..persistence.database import engine
+        pool = engine.pool
+        checked_out = getattr(pool, "checkedout", lambda: 0)()
+        size = getattr(pool, "size", lambda: 5)()
+        overflow = getattr(pool, "overflow", lambda: 0)()
+
         await session.execute(text("SELECT 1"))
         components["database"] = HealthComponentStatus(
             status="healthy",
-            details={"engine": "PostgreSQL 16", "pool": "asyncpg"},
+            details={
+                "engine": "PostgreSQL 16",
+                "pool": "asyncpg",
+                "pool_size": size,
+                "checked_out": checked_out,
+                "overflow": overflow,
+            },
         )
     except Exception as exc:
         logger.error("Database health check failed", error=str(exc), correlation_id=correlation_id)
@@ -111,6 +123,26 @@ async def check_system_health(
     )
     if not gemini_key_configured and overall_status == "healthy":
         overall_status = "degraded"
+
+    # 4. Background Execution Manager Status
+    try:
+        from ..orchestration.background_manager import get_background_manager
+        bg_mgr = get_background_manager()
+        active_count = len(bg_mgr._active_tasks)
+        watchdog_active = bg_mgr._watchdog_task is not None and not bg_mgr._watchdog_task.done()
+        components["background_manager"] = HealthComponentStatus(
+            status="healthy",
+            details={
+                "active_executions": active_count,
+                "watchdog_running": watchdog_active,
+            },
+        )
+    except Exception as exc:
+        logger.error("Background manager health check failed", error=str(exc), correlation_id=correlation_id)
+        components["background_manager"] = HealthComponentStatus(
+            status="degraded",
+            details={"error": str(exc)},
+        )
 
     payload = HealthResponse(
         status=overall_status,
