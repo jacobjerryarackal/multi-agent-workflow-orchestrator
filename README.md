@@ -62,6 +62,14 @@ All architectural specifications, formal contracts, and failure-mode taxonomies 
 | **[Testing Strategy](docs/testing/testing-strategy.md)** | Testing pyramid, failure-to-test mapping matrix, and mock provider specs. |
 | **[Implementation Roadmap](docs/implementation-plan.md)** | Bounded 5-day phased implementation plan with explicit acceptance criteria. |
 | **[ADRs (Decisions)](docs/adr/)** | Architectural Decision Records (ADR 001 through ADR 004). |
+| **[Deployment Architecture](docs/deployment/architecture.md)** | Cloud topology (Next.js/Vercel + FastAPI/Render + PostgreSQL). |
+| **[Environment Variables](docs/deployment/environment.md)** | Comprehensive environment variables and secret boundaries guide. |
+| **[Render Guide](docs/deployment/render.md)** | Backend containerization and managed PostgreSQL deployment. |
+| **[Vercel Guide](docs/deployment/vercel.md)** | Frontend deployment and serverless API rewrite proxy setup. |
+| **[Database Migrations](docs/deployment/migrations.md)** | Alembic migration lifecycle, safety rules, and pre-deploy hooks. |
+| **[Operations & Telemetry](docs/deployment/operations.md)** | Monitoring, health checks, and Prometheus metrics guide. |
+| **[Troubleshooting](docs/deployment/troubleshooting.md)** | Common production failure scenarios and resolutions. |
+| **[Backup & Recovery](docs/deployment/backup_restore.md)** | Disaster recovery runbook for PostgreSQL. |
 
 ---
 
@@ -83,3 +91,45 @@ All architectural specifications, formal contracts, and failure-mode taxonomies 
 * **Frontend**: Next.js 14 (App Router), TypeScript, Tailwind CSS, Lucide Icons.
 * **Testing**: Pytest, Pytest-Asyncio, HTTPX.
 * **Deployment Targets**: Render (Backend Web Service), Vercel (Frontend Control Plane), Managed PostgreSQL.
+
+---
+
+## 6. Quick Start & Local Development
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+ & npm
+- PostgreSQL 16 instance running locally
+
+### Backend Setup
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env and supply your GEMINI_API_KEY and DATABASE_URL
+
+# 3. Apply database migrations
+alembic -c backend/alembic.ini upgrade head
+
+# 4. Run backend server
+uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
+# Open http://localhost:3000 in your browser
+```
+
+### Verification & Smoke Testing
+```bash
+# Run backend test suite
+pytest tests -v
+
+# Run smoke test against running backend
+python scripts/deploy_smoke_test.py --url http://127.0.0.1:8000
+```
