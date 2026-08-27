@@ -16,6 +16,7 @@ from ..core.exceptions import (
     WorkflowNotFoundError,
     WorkflowValidationError,
 )
+from ..core.telemetry import telemetry
 from ..domain.interfaces.evaluation_provider import EvaluationProvider
 from ..domain.interfaces.repository import (
     ArtifactRepository,
@@ -140,6 +141,13 @@ class WorkflowExecutionEngine:
             # 5. Persist workflow execution
             saved_execution = await self.execution_repo.create_workflow_execution(execution)
 
+        # Record submission telemetry metric
+        telemetry.increment_counter(
+            "workflow_submissions_total",
+            value=1.0,
+            labels={"trigger_type": trigger_type},
+        )
+
         # 6. Audit event (only for newly created execution)
         if saved_execution.id == execution.id:
             await self._emit_event(
@@ -179,6 +187,7 @@ class WorkflowExecutionEngine:
             if execution.status == WorkflowExecutionStatus.QUEUED:
                 WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.START)
                 execution = await self.execution_repo.update_workflow_execution(execution)
+                telemetry.increment_counter("workflow_started_total", value=1.0)
 
         task_spec_map = {t.task_key: t for t in workflow.tasks}
 
@@ -206,6 +215,15 @@ class WorkflowExecutionEngine:
                     execution.completed_at = datetime.utcnow()
                     execution.error_summary = f"Workflow exceeded maximum duration of {workflow.max_workflow_duration_seconds}s."
                     await self.execution_repo.update_workflow_execution(execution)
+                telemetry.increment_counter(
+                    "workflow_failed_total",
+                    value=1.0,
+                    labels={"error_category": "timeout"},
+                )
+                telemetry.observe_histogram(
+                    "workflow_duration_seconds",
+                    value=elapsed_seconds,
+                )
                 await self._emit_event(
                     execution_id=execution.id,
                     workflow_id=workflow.id,
@@ -318,6 +336,17 @@ class WorkflowExecutionEngine:
             await self.execution_repo.update_task_execution(claimed_task)
             execution.tasks[task_key] = claimed_task
 
+        telemetry.increment_counter(
+            "task_started_total",
+            value=1.0,
+            labels={"agent_id": task_spec.agent_id},
+        )
+        telemetry.increment_counter(
+            "task_lease_claim_total",
+            value=1.0,
+            labels={"worker_id": "process_worker"},
+        )
+
         await self._emit_event(
             execution_id=execution.id,
             workflow_id=execution.workflow_id,
@@ -388,6 +417,7 @@ class WorkflowExecutionEngine:
         for prod_artifact in result.artifacts:
             computed_checksum = hashlib.sha256(prod_artifact.content_or_uri.encode("utf-8")).hexdigest()
             if prod_artifact.checksum_sha256 != computed_checksum:
+                telemetry.increment_counter("artifact_integrity_failure_total", value=1.0)
                 task_exec.status = TaskExecutionStatus.FAILED
                 task_exec.error_details = {
                     "error": f"Artifact '{prod_artifact.name}' checksum mismatch. Expected {prod_artifact.checksum_sha256}, got {computed_checksum}",
@@ -417,6 +447,16 @@ class WorkflowExecutionEngine:
             )
             async with self._session_lock:
                 await self.artifact_repo.save_artifact(artifact)
+            telemetry.increment_counter(
+                "artifact_created_total",
+                value=1.0,
+                labels={"artifact_type": prod_artifact.artifact_type},
+            )
+            telemetry.increment_counter(
+                "artifact_integrity_verified_total",
+                value=1.0,
+                labels={"status": "valid"},
+            )
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=execution.workflow_id,
@@ -429,6 +469,11 @@ class WorkflowExecutionEngine:
         # 2. Quality Evaluation Gate (if enabled)
         if task_spec.evaluation_gate.enabled:
             eval_gate = task_spec.evaluation_gate
+            telemetry.increment_counter(
+                "evaluation_started_total",
+                value=1.0,
+                labels={"evaluator_type": eval_gate.evaluator_name},
+            )
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=execution.workflow_id,
@@ -453,6 +498,25 @@ class WorkflowExecutionEngine:
 
             eval_result: EvaluationResult = await self.evaluator.evaluate(eval_request)
             
+            telemetry.increment_counter(
+                "evaluation_completed_total",
+                value=1.0,
+                labels={
+                    "evaluator_type": eval_gate.evaluator_name,
+                    "verdict": eval_result.verdict.value,
+                },
+            )
+            telemetry.observe_histogram(
+                "evaluation_duration_seconds",
+                value=eval_result.evaluation_duration_ms / 1000.0,
+                labels={"evaluator_type": eval_gate.evaluator_name},
+            )
+            telemetry.observe_histogram(
+                "evaluation_score",
+                value=eval_result.score,
+                labels={"evaluator_type": eval_gate.evaluator_name},
+            )
+
             # Save evaluation history in structured audit trail
             task_exec.evaluation_history.append(eval_result.model_dump())
 
@@ -591,6 +655,7 @@ class WorkflowExecutionEngine:
             async with self._session_lock:
                 await self.execution_repo.update_task_execution(task_exec)
                 execution.tasks[task_key] = task_exec
+            telemetry.increment_counter("approval_requested_total", value=1.0)
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=execution.workflow_id,
@@ -604,6 +669,16 @@ class WorkflowExecutionEngine:
             async with self._session_lock:
                 await self.execution_repo.update_task_execution(task_exec)
                 execution.tasks[task_key] = task_exec
+            telemetry.increment_counter(
+                "task_completed_total",
+                value=1.0,
+                labels={"agent_id": task_spec.agent_id},
+            )
+            telemetry.observe_histogram(
+                "task_execution_duration_seconds",
+                value=(task_exec.execution_duration_ms or 0) / 1000.0,
+                labels={"agent_id": task_spec.agent_id},
+            )
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=execution.workflow_id,
@@ -643,6 +718,11 @@ class WorkflowExecutionEngine:
                 async with self._session_lock:
                     await self.execution_repo.update_task_execution(task_exec)
                     execution.tasks[task_key] = task_exec
+                telemetry.increment_counter(
+                    "task_retry_total",
+                    value=1.0,
+                    labels={"agent_id": task_spec.agent_id},
+                )
                 await self._emit_event(
                     execution_id=execution.id,
                     workflow_id=execution.workflow_id,
@@ -666,6 +746,19 @@ class WorkflowExecutionEngine:
         async with self._session_lock:
             await self.execution_repo.update_task_execution(task_exec)
             execution.tasks[task_key] = task_exec
+        telemetry.increment_counter(
+            "task_failed_total",
+            value=1.0,
+            labels={
+                "agent_id": task_spec.agent_id,
+                "error_category": result.error_category or "execution_failure",
+            },
+        )
+        telemetry.observe_histogram(
+            "task_execution_duration_seconds",
+            value=(task_exec.execution_duration_ms or 0) / 1000.0,
+            labels={"agent_id": task_spec.agent_id},
+        )
         await self._emit_event(
             execution_id=execution.id,
             workflow_id=execution.workflow_id,
@@ -724,6 +817,8 @@ class WorkflowExecutionEngine:
         is_all_completed = all(t.status == TaskExecutionStatus.COMPLETED for t in all_tasks)
         has_any_failed = any(t.status in (TaskExecutionStatus.FAILED, TaskExecutionStatus.TIMED_OUT) for t in all_tasks)
 
+        total_duration_sec = (execution.execution_duration_ms or 0) / 1000.0
+
         if is_all_completed:
             WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.COMPLETE)
             # pyrefly: ignore [deprecated]
@@ -737,6 +832,8 @@ class WorkflowExecutionEngine:
 
             async with self._session_lock:
                 await self.execution_repo.update_workflow_execution(execution)
+            telemetry.increment_counter("workflow_completed_total", value=1.0)
+            telemetry.observe_histogram("workflow_duration_seconds", value=total_duration_sec)
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=workflow.id,
@@ -751,6 +848,12 @@ class WorkflowExecutionEngine:
             execution.error_summary = "One or more critical tasks failed unrecoverably."
             async with self._session_lock:
                 await self.execution_repo.update_workflow_execution(execution)
+            telemetry.increment_counter(
+                "workflow_failed_total",
+                value=1.0,
+                labels={"error_category": "task_failure"},
+            )
+            telemetry.observe_histogram("workflow_duration_seconds", value=total_duration_sec)
             await self._emit_event(
                 execution_id=execution.id,
                 workflow_id=workflow.id,
@@ -796,6 +899,12 @@ class WorkflowExecutionEngine:
         recovered_count = 0
 
         for model in stale_models:
+            telemetry.increment_counter("task_lease_expired_total", value=1.0)
+            telemetry.increment_counter(
+                "task_recovery_total",
+                value=1.0,
+                labels={"reason": "lease_expired"},
+            )
             task_domain = model.to_domain()
             # Retrieve workflow spec for task retry policy
             async with self._session_lock:
@@ -818,6 +927,7 @@ class WorkflowExecutionEngine:
                 async with self._session_lock:
                     await self.execution_repo.update_task_execution(model.to_domain())
 
+                telemetry.increment_counter("task_recovery_retry_total", value=1.0)
                 await self._emit_event(
                     execution_id=model.workflow_execution_id,
                     workflow_id=workflow_exec.workflow_id,
@@ -850,6 +960,7 @@ class WorkflowExecutionEngine:
                 async with self._session_lock:
                     await self.execution_repo.update_task_execution(model.to_domain())
 
+                telemetry.increment_counter("task_recovery_failure_total", value=1.0)
                 await self._emit_event(
                     execution_id=model.workflow_execution_id,
                     workflow_id=workflow_exec.workflow_id,
@@ -867,3 +978,4 @@ class WorkflowExecutionEngine:
             recovered_count += 1
 
         return recovered_count
+
