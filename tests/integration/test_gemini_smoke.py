@@ -3,9 +3,10 @@
 import os
 import pytest
 from pydantic import BaseModel, Field
+from app.core.config import settings
 from app.providers.gemini import GeminiModelProvider
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
 
 
 class SmokeTestSchema(BaseModel):
