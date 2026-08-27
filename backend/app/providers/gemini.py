@@ -41,7 +41,7 @@ class GeminiModelProvider(ModelProvider):
         api_key: Optional[str] = None,
         default_model: str = "gemini-2.5-flash",
     ):
-        self.api_key = api_key or settings.GEMINI_API_KEY
+        self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
         self.default_model = default_model
         self._client: Any = None
 
