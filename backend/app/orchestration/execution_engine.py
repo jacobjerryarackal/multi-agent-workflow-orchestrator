@@ -1,7 +1,7 @@
 """Production-grade multi-agent workflow execution engine with quality evaluation and bounded revision loops."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -51,13 +51,14 @@ class WorkflowExecutionEngine:
     """
     Core orchestrator responsible for end-to-end multi-agent workflow execution:
     - DAG task dependency resolution
-    - Atomic task locking and claiming
+    - Atomic task locking and claiming (PostgreSQL row-level locking)
     - Input mapping and artifact passing across tasks
-    - Agent registry discovery and bounded execution
+    - Agent discovery and parallel bounded execution
     - Layered quality evaluation (Deterministic + Semantic LLM)
     - Bounded optimization and revision cycles
     - Failure handling, backoff retries, and failure propagation
     - Append-only event auditing and terminal state finalization
+    - Stale task lease recovery and resume
     """
 
     def __init__(
@@ -75,7 +76,7 @@ class WorkflowExecutionEngine:
         self.artifact_repo = artifact_repo
         self.agent_registry = agent_registry
         self.evaluator = evaluator or CompositeQualityEvaluator()
-        self._db_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
 
     async def submit_workflow(
         self,
@@ -88,7 +89,7 @@ class WorkflowExecutionEngine:
         Submits and initializes a workflow execution record from a registered WorkflowSpec.
         Validates the DAG structure, creates task execution placeholders, and persists the record.
         """
-        async with self._db_lock:
+        async with self._session_lock:
             workflow = await self.workflow_repo.get_workflow_spec(workflow_id)
             if not workflow:
                 raise WorkflowNotFoundError(f"Workflow with ID '{workflow_id}' does not exist.")
@@ -164,7 +165,7 @@ class WorkflowExecutionEngine:
         Drives the execution loop until the workflow reaches a terminal state
         or pauses on a human approval / external gate.
         """
-        async with self._db_lock:
+        async with self._session_lock:
             execution = await self.execution_repo.get_workflow_execution(execution_id)
             if not execution:
                 raise WorkflowNotFoundError(f"Execution '{execution_id}' not found.")
@@ -198,7 +199,7 @@ class WorkflowExecutionEngine:
             # 1. Global Workflow Timeout Check
             elapsed_seconds = time.perf_counter() - start_time
             if elapsed_seconds > workflow.max_workflow_duration_seconds:
-                async with self._db_lock:
+                async with self._session_lock:
                     WorkflowStateMachine.transition_workflow(execution, WorkflowCommand.TIMEOUT)
                     # pyrefly: ignore [deprecated]
                     execution.completed_at = datetime.utcnow()
@@ -212,6 +213,12 @@ class WorkflowExecutionEngine:
                 )
                 break
 
+            # Refresh execution state from database
+            async with self._session_lock:
+                latest_execution = await self.execution_repo.get_workflow_execution(execution_id)
+                if latest_execution:
+                    execution = latest_execution
+
             # 2. Update task statuses based on DAG dependency resolution
             completed_keys = {
                 k for k, t in execution.tasks.items() if t.status == TaskExecutionStatus.COMPLETED
@@ -220,7 +227,7 @@ class WorkflowExecutionEngine:
                 k for k, t in execution.tasks.items() if t.status in (TaskExecutionStatus.FAILED, TaskExecutionStatus.TIMED_OUT)
             }
 
-            async with self._db_lock:
+            async with self._session_lock:
                 # Unblock blocked tasks whose dependencies are fully met
                 for task_key, task_exec in execution.tasks.items():
                     if task_exec.status == TaskExecutionStatus.BLOCKED:
@@ -266,7 +273,7 @@ class WorkflowExecutionEngine:
 
             tasks_to_run = ready_tasks[: workflow.max_parallel_tasks]
 
-            # 4. Execute ready tasks concurrently
+            # 4. Execute ready tasks concurrently (agents run in parallel outside lock)
             await asyncio.gather(
                 *[self._process_single_task(execution, task_spec_map[t.task_key]) for t in tasks_to_run]
             )
@@ -274,7 +281,7 @@ class WorkflowExecutionEngine:
         total_duration_ms = int((time.perf_counter() - start_time) * 1000)
         execution.execution_duration_ms = total_duration_ms
 
-        async with self._db_lock:
+        async with self._session_lock:
             final_exec = await self.execution_repo.get_workflow_execution(execution_id)
             return final_exec or execution
 
@@ -285,19 +292,21 @@ class WorkflowExecutionEngine:
     ) -> None:
         """
         Executes a single task within the workflow execution:
-        - Atomic claim via SELECT FOR UPDATE
+        - Atomic claim via SELECT FOR UPDATE with lease duration
         - Input mapping resolution from initial inputs + upstream outputs + revision context
-        - Agent discovery & invocation
+        - Agent discovery & non-blocking execution (parallel across tasks)
         - Output & artifact persistence
         - Layered Quality Evaluation & Revision Looping
         - State transition & retry handling
         """
         task_key = task_spec.task_key
+        lease_duration = task_spec.timeout_seconds + 30
 
-        # 1. Atomic claim (acquires row lock, sets status=RUNNING, increments attempt_count)
-        async with self._db_lock:
-            claimed_task = await self.execution_repo.claim_task_for_execution(
-                execution.id, task_key
+        # 1. Atomic claim (acquires row lock, sets status=RUNNING, increments attempt_count, sets lease)
+        async with self._session_lock:
+            repo_any: Any = self.execution_repo
+            claimed_task = await repo_any.claim_task_for_execution(
+                execution.id, task_key, lease_duration_seconds=lease_duration
             )
             if not claimed_task:
                 return
@@ -317,6 +326,7 @@ class WorkflowExecutionEngine:
             payload={
                 "attempt_count": claimed_task.attempt_count,
                 "revision_count": claimed_task.revision_count,
+                "lease_duration_seconds": lease_duration,
             },
         )
 
@@ -324,7 +334,7 @@ class WorkflowExecutionEngine:
         try:
             agent = self.agent_registry.get(task_spec.agent_id)
         except AgentNotFoundError as exc:
-            async with self._db_lock:
+            async with self._session_lock:
                 claimed_task.status = TaskExecutionStatus.FAILED
                 claimed_task.error_details = {"error": str(exc), "category": "agent_not_found"}
                 await self.execution_repo.update_task_execution(claimed_task)
@@ -349,7 +359,7 @@ class WorkflowExecutionEngine:
             timeout_seconds=task_spec.timeout_seconds,
         )
 
-        # 4. Execute agent (non-blocking model I/O runs in parallel)
+        # 4. Execute agent (non-blocking model I/O runs in parallel without holding session lock)
         agent_result: AgentResult = await agent.execute(agent_context)
 
         # 5. Handle execution result
@@ -382,7 +392,7 @@ class WorkflowExecutionEngine:
                     "error": f"Artifact '{prod_artifact.name}' checksum mismatch. Expected {prod_artifact.checksum_sha256}, got {computed_checksum}",
                     "category": "artifact_integrity_failure",
                 }
-                async with self._db_lock:
+                async with self._session_lock:
                     await self.execution_repo.update_task_execution(task_exec)
                     execution.tasks[task_key] = task_exec
                 await self._emit_event(
@@ -404,7 +414,7 @@ class WorkflowExecutionEngine:
                 checksum_sha256=prod_artifact.checksum_sha256,
                 metadata=prod_artifact.metadata,
             )
-            async with self._db_lock:
+            async with self._session_lock:
                 await self.artifact_repo.save_artifact(artifact)
             await self._emit_event(
                 execution_id=execution.id,
@@ -489,7 +499,7 @@ class WorkflowExecutionEngine:
                         actionable_feedback=eval_result.actionable_feedback,
                     )
                     task_exec.input_data["_revision_context"] = rev_ctx.model_dump()
-                    async with self._db_lock:
+                    async with self._session_lock:
                         await self.execution_repo.update_task_execution(task_exec)
                         execution.tasks[task_key] = task_exec
                     await self._emit_event(
@@ -509,7 +519,7 @@ class WorkflowExecutionEngine:
                     # Revision budget exhausted -> apply rejection policy
                     if eval_gate.rejection_policy == "ESCALATE":
                         WorkflowStateMachine.transition_task(task_exec, TaskCommand.ESCALATE)
-                        async with self._db_lock:
+                        async with self._session_lock:
                             await self.execution_repo.update_task_execution(task_exec)
                             execution.tasks[task_key] = task_exec
                         await self._emit_event(
@@ -528,7 +538,7 @@ class WorkflowExecutionEngine:
                             "failed_checks": eval_result.failed_checks,
                             "revision_count": task_exec.revision_count,
                         }
-                        async with self._db_lock:
+                        async with self._session_lock:
                             await self.execution_repo.update_task_execution(task_exec)
                             execution.tasks[task_key] = task_exec
                         await self._emit_event(
@@ -542,7 +552,7 @@ class WorkflowExecutionEngine:
                         return
             elif eval_result.verdict == EvaluationVerdict.ESCALATE:
                 WorkflowStateMachine.transition_task(task_exec, TaskCommand.ESCALATE)
-                async with self._db_lock:
+                async with self._session_lock:
                     await self.execution_repo.update_task_execution(task_exec)
                     execution.tasks[task_key] = task_exec
                 await self._emit_event(
@@ -561,7 +571,7 @@ class WorkflowExecutionEngine:
                     "error": f"Evaluation rejected task output: {eval_result.rationale}",
                     "failed_checks": eval_result.failed_checks,
                 }
-                async with self._db_lock:
+                async with self._session_lock:
                     await self.execution_repo.update_task_execution(task_exec)
                     execution.tasks[task_key] = task_exec
                 await self._emit_event(
@@ -577,7 +587,7 @@ class WorkflowExecutionEngine:
         # 3. Check approval gate
         if task_spec.approval_gate.required:
             WorkflowStateMachine.transition_task(task_exec, TaskCommand.REQUIRE_APPROVAL)
-            async with self._db_lock:
+            async with self._session_lock:
                 await self.execution_repo.update_task_execution(task_exec)
                 execution.tasks[task_key] = task_exec
             await self._emit_event(
@@ -590,7 +600,7 @@ class WorkflowExecutionEngine:
             )
         else:
             WorkflowStateMachine.transition_task(task_exec, TaskCommand.COMPLETE)
-            async with self._db_lock:
+            async with self._session_lock:
                 await self.execution_repo.update_task_execution(task_exec)
                 execution.tasks[task_key] = task_exec
             await self._emit_event(
@@ -629,7 +639,7 @@ class WorkflowExecutionEngine:
                     TaskCommand.RETRY,
                     max_retries=max_retries,
                 )
-                async with self._db_lock:
+                async with self._session_lock:
                     await self.execution_repo.update_task_execution(task_exec)
                     execution.tasks[task_key] = task_exec
                 await self._emit_event(
@@ -652,7 +662,7 @@ class WorkflowExecutionEngine:
         WorkflowStateMachine.transition_task(task_exec, TaskCommand.FAIL)
         # pyrefly: ignore [deprecated]
         task_exec.completed_at = datetime.utcnow()
-        async with self._db_lock:
+        async with self._session_lock:
             await self.execution_repo.update_task_execution(task_exec)
             execution.tasks[task_key] = task_exec
         await self._emit_event(
@@ -724,7 +734,7 @@ class WorkflowExecutionEngine:
                 final_outputs[t.task_key] = t.output_data
             execution.final_outputs = final_outputs
 
-            async with self._db_lock:
+            async with self._session_lock:
                 await self.execution_repo.update_workflow_execution(execution)
             await self._emit_event(
                 execution_id=execution.id,
@@ -738,7 +748,7 @@ class WorkflowExecutionEngine:
             # pyrefly: ignore [deprecated]
             execution.completed_at = datetime.utcnow()
             execution.error_summary = "One or more critical tasks failed unrecoverably."
-            async with self._db_lock:
+            async with self._session_lock:
                 await self.execution_repo.update_workflow_execution(execution)
             await self._emit_event(
                 execution_id=execution.id,
@@ -767,5 +777,92 @@ class WorkflowExecutionEngine:
             payload=payload,
             actor="orchestration_engine",
         )
-        async with self._db_lock:
+        async with self._session_lock:
             await self.event_repo.append_event(event)
+
+    async def recover_stale_tasks(self, now: Optional[datetime] = None) -> int:
+        """
+        Scans for RUNNING tasks whose lease has expired.
+        Reclaims them safely:
+        - If attempt_count < max_attempts: re-queues as READY to retry
+        - If attempt_count >= max_attempts: marks FAILED
+        Returns number of tasks recovered.
+        """
+        repo_any: Any = self.execution_repo
+        async with self._session_lock:
+            stale_models = await repo_any.find_and_lock_stale_tasks(now=now) if hasattr(repo_any, "find_and_lock_stale_tasks") else []
+
+        recovered_count = 0
+
+        for model in stale_models:
+            task_domain = model.to_domain()
+            # Retrieve workflow spec for task retry policy
+            async with self._session_lock:
+                workflow_exec = await self.execution_repo.get_workflow_execution(model.workflow_execution_id)
+            if not workflow_exec:
+                continue
+            async with self._session_lock:
+                workflow = await self.workflow_repo.get_workflow_spec(workflow_exec.workflow_id)
+            if not workflow:
+                continue
+
+            task_spec = next((t for t in workflow.tasks if t.task_key == model.task_key), None)
+            max_attempts = task_spec.retry_policy.max_attempts if task_spec else 3
+
+            if model.attempt_count < max_attempts:
+                # Reclaim task to READY for next execution attempt
+                model.status = TaskExecutionStatus.READY.value
+                model.lease_until = None
+                model.leased_by = None
+                async with self._session_lock:
+                    await self.execution_repo.update_task_execution(model.to_domain())
+
+                await self._emit_event(
+                    execution_id=model.workflow_execution_id,
+                    workflow_id=workflow_exec.workflow_id,
+                    task_key=model.task_key,
+                    agent_id=model.agent_id,
+                    event_type=EventType.TASK_RETRIED,
+                    payload={
+                        "reason": "Task lease expired, reclaimed to READY",
+                        "attempt": model.attempt_count,
+                        "max_attempts": max_attempts,
+                    },
+                )
+                logger.info(
+                    "Stale task reclaimed to READY",
+                    task_key=model.task_key,
+                    execution_id=model.workflow_execution_id,
+                    attempt=model.attempt_count,
+                )
+            else:
+                # Retry budget exhausted -> mark FAILED
+                model.status = TaskExecutionStatus.FAILED.value
+                model.lease_until = None
+                model.leased_by = None
+                model.error_details = {
+                    "error": "Task lease expired and retry budget exhausted.",
+                    "category": "TEMPORAL_FAILURE",
+                }
+                # pyrefly: ignore [deprecated]
+                model.completed_at = datetime.utcnow()
+                async with self._session_lock:
+                    await self.execution_repo.update_task_execution(model.to_domain())
+
+                await self._emit_event(
+                    execution_id=model.workflow_execution_id,
+                    workflow_id=workflow_exec.workflow_id,
+                    task_key=model.task_key,
+                    agent_id=model.agent_id,
+                    event_type=EventType.TASK_FAILED,
+                    payload={"error": model.error_details["error"]},
+                )
+                logger.warning(
+                    "Stale task failed after lease expiration",
+                    task_key=model.task_key,
+                    execution_id=model.workflow_execution_id,
+                )
+
+            recovered_count += 1
+
+        return recovered_count
