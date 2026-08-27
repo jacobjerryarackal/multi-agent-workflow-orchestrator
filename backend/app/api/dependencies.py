@@ -1,8 +1,13 @@
 """FastAPI dependency injection providers for database, repositories, and domain services."""
 
-from typing import AsyncGenerator
+from typing import AsyncGenerator, TYPE_CHECKING
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from ..services.workflow_service import WorkflowService
+    from ..services.execution_service import ExecutionService
+    from ..services.system_service import SystemService
 
 from ..core.config import settings
 from ..domain.interfaces.repository import (
@@ -30,9 +35,6 @@ from ..agents.builtins import (
 )
 from ..providers.gemini import GeminiModelProvider
 from ..evaluators.composite import CompositeQualityEvaluator
-from ..services.workflow_service import WorkflowService
-from ..services.execution_service import ExecutionService
-from ..services.system_service import SystemService
 
 # Global singleton instances for agent registry and model provider
 _global_registry: AgentRegistry | None = None
