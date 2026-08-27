@@ -260,6 +260,9 @@ class TaskExecutionModel(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     execution_duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     token_usage: Mapped[Dict[str, int]] = mapped_column(JSON, nullable=False, default=dict)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    leased_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
     workflow_execution: Mapped["WorkflowExecutionModel"] = relationship(
         "WorkflowExecutionModel", back_populates="task_executions"
@@ -269,6 +272,7 @@ class TaskExecutionModel(Base):
         UniqueConstraint("workflow_execution_id", "task_key", name="uq_execution_task_key"),
         Index("ix_task_executions_status", "status"),
         Index("ix_task_executions_exec_id", "workflow_execution_id"),
+        Index("ix_task_executions_lease", "status", "lease_until"),
     )
 
     def to_domain(self) -> TaskExecution:
