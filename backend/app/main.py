@@ -12,6 +12,8 @@ from .api.errors import register_exception_handlers
 from .api.middleware.correlation import CorrelationIdMiddleware, get_correlation_id
 from .api.middleware.security import SecurityHeadersMiddleware
 from .api.middleware.metrics import HttpMetricsMiddleware
+from .api.middleware.request_size import RequestSizeLimitMiddleware
+from .api.middleware.rate_limit import ProcessLocalRateLimiter
 from .api.v1 import v1_router
 from .persistence.database import engine, Base
 from .persistence.models import (
@@ -80,6 +82,20 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
 
     # HTTP Telemetry & Metrics middleware
     app.add_middleware(HttpMetricsMiddleware)
+
+    # Request Body Size Limit Middleware (10 MB cap)
+    app.add_middleware(
+        RequestSizeLimitMiddleware,
+        max_size_bytes=active_settings.MAX_REQUEST_SIZE_BYTES,
+    )
+
+    # Process-Local Rate Limiter
+    app.add_middleware(
+        ProcessLocalRateLimiter,
+        requests_per_minute=active_settings.RATE_LIMIT_PER_MINUTE,
+        burst_allowance=active_settings.RATE_LIMIT_BURST,
+        enabled=active_settings.RATE_LIMIT_ENABLED,
+    )
 
     # CORS Middleware configured from environment
     app.add_middleware(
