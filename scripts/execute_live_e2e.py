@@ -17,7 +17,7 @@ FRONTEND_BASE = "http://localhost:3000"
 
 
 async def main():
-    async with httpx.AsyncClient(base_url=API_BASE, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=API_BASE, timeout=120.0) as client:
         # 1. Health Check
         health_resp = await client.get("/api/v1/health")
         print(f"[1] Backend Health HTTP {health_resp.status_code}: {health_resp.json()['status']}")
@@ -43,6 +43,7 @@ async def main():
                     "name": "Quality Analysis Stage",
                     "agent_id": "analyst_agent",
                     "depends_on": ["step_1_plan"],
+                    "input_mappings": {"research_findings": "step_1_plan.sub_tasks"},
                     "timeout_seconds": 60,
                     "retry_policy": {"max_attempts": 2},
                     "approval_gate": {"required": False},
@@ -77,7 +78,7 @@ async def main():
 
         # 4. Poll until terminal
         final_exec = None
-        for _ in range(30):
+        for _ in range(60):
             await asyncio.sleep(1.0)
             status_resp = await client.get(f"/api/v1/executions/{execution_id}")
             if status_resp.status_code == 200:
