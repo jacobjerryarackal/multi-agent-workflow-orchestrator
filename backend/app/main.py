@@ -29,8 +29,8 @@ logger = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan context manager:
-    - Startup: Confirms configuration, verifies readiness and ensures database schemas.
-    - Shutdown: Disposes database connection pool cleanly.
+    - Startup: Confirms configuration, runs startup execution recovery, starts watchdog supervisor.
+    - Shutdown: Performs graceful shutdown of background tasks and disposes database connection pool.
     """
     logger.info(
         "Starting Multi-Agent Workflow Orchestrator API",
@@ -39,10 +39,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Startup recovery & watchdog supervisor
+    from .orchestration.background_manager import get_background_manager
+    bg_manager = get_background_manager()
+    bg_manager._shutdown_event.clear()
+    await bg_manager.recover_stranded_executions()
+    bg_manager.start_watchdog(interval_seconds=10.0)
+
     yield
+
     logger.info("Shutting down Multi-Agent Workflow Orchestrator API")
-    await engine.dispose()
-    logger.info("Database engine connections closed")
+    await bg_manager.graceful_shutdown(timeout_seconds=5.0)
+    bg_manager._shutdown_event.clear()
 
 
 
