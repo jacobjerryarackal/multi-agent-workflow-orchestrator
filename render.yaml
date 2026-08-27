@@ -1,0 +1,65 @@
+# ==============================================================================
+# Render Blueprint Manifest - Multi-Agent Workflow Orchestrator (Free-Tier)
+# ==============================================================================
+
+services:
+  # Backend FastAPI Orchestration Engine
+  - type: web
+    name: orchestrator-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/v1/health
+    
+    # Pre-deployment migration command executes before new version receives traffic
+    preDeployCommand: alembic -c backend/alembic.ini upgrade head
+
+    envVars:
+      - key: APP_NAME
+        value: MultiAgentWorkflowOrchestrator
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEBUG
+        value: "false"
+      - key: PORT
+        value: "8000"
+      - key: CORS_ORIGINS
+        sync: false  # Set in Render Dashboard: e.g. https://your-frontend.vercel.app
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orchestrator-postgres
+          property: connectionString
+      - key: DATABASE_POOL_SIZE
+        value: "5"
+      - key: DATABASE_MAX_OVERFLOW
+        value: "5"
+      - key: GEMINI_API_KEY
+        sync: false  # Secure secret: configure in Render Dashboard
+      - key: DEFAULT_MODEL_NAME
+        value: gemini-2.5-flash
+      - key: REASONING_MODEL_NAME
+        value: gemini-2.5-pro
+      - key: MAX_WORKFLOW_DURATION_SECONDS
+        value: "600"
+      - key: MAX_TASK_DURATION_SECONDS
+        value: "60"
+      - key: MAX_PARALLEL_TASKS
+        value: "5"
+      - key: MAX_TASK_RETRIES
+        value: "3"
+      - key: MAX_REQUEST_SIZE_BYTES
+        value: "10485760"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "120"
+
+databases:
+  # Managed PostgreSQL Database (Free-Tier)
+  - name: orchestrator-postgres
+    plan: free
+    databaseName: orchestrator_db
+    user: orchestrator_user
+    ipAllowList: [] # Accessible from Render services within private network
