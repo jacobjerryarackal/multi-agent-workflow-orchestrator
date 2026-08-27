@@ -92,7 +92,7 @@ async def submit_execution(
         input_data=request.input_data,
         idempotency_key=request.idempotency_key,
         trigger_type=request.trigger_type,
-        run_to_completion=True,
+        run_to_completion=False,
     )
     return _map_execution_to_detail(execution)
 
