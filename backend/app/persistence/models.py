@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -200,7 +201,14 @@ class WorkflowExecutionModel(Base):
     __table_args__ = (
         Index("ix_workflow_executions_status", "status"),
         Index("ix_workflow_executions_workflow_id", "workflow_id"),
-        Index("ix_workflow_executions_idempotency", "workflow_id", "idempotency_key"),
+        Index(
+            "uq_workflow_executions_idempotency",
+            "workflow_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     def to_domain(self) -> WorkflowExecution:
