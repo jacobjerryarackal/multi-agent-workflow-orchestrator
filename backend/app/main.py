@@ -37,8 +37,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app_name=settings.APP_NAME,
         env=settings.APP_ENV,
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
     # Startup recovery & watchdog supervisor
     from .orchestration.background_manager import get_background_manager
