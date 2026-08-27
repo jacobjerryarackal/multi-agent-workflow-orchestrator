@@ -25,6 +25,7 @@ from ..core.exceptions import (
     ApprovalGateError,
     ArtifactIntegrityError,
 )
+from ..core.telemetry import telemetry
 
 logger = structlog.get_logger(__name__)
 
@@ -121,6 +122,7 @@ class ExecutionService:
         execution.completed_at = datetime.utcnow()
         execution.error_summary = "Workflow execution cancelled by user request."
         updated_exec = await self.execution_repo.update_workflow_execution(execution)
+        telemetry.increment_counter("workflow_cancelled_total", value=1.0)
 
         event = WorkflowEvent(
             workflow_execution_id=execution.id,
@@ -154,6 +156,12 @@ class ExecutionService:
         WorkflowStateMachine.transition_task(task, TaskCommand.APPROVE)
         task.completed_at = datetime.utcnow()
         updated_task = await self.execution_repo.update_task_execution(task)
+        telemetry.increment_counter("approval_approved_total", value=1.0)
+        telemetry.increment_counter(
+            "task_completed_total",
+            value=1.0,
+            labels={"agent_id": task.agent_id},
+        )
 
         event = WorkflowEvent(
             workflow_execution_id=execution.id,
@@ -188,6 +196,12 @@ class ExecutionService:
         WorkflowStateMachine.transition_task(task, TaskCommand.REJECT)
         task.error_details = {"rejected_by": rejector, "rejection_reason": reason}
         updated_task = await self.execution_repo.update_task_execution(task)
+        telemetry.increment_counter("approval_rejected_total", value=1.0)
+        telemetry.increment_counter(
+            "task_failed_total",
+            value=1.0,
+            labels={"agent_id": task.agent_id, "error_category": "approval_rejected"},
+        )
 
         event = WorkflowEvent(
             workflow_execution_id=execution.id,
@@ -215,9 +229,15 @@ class ExecutionService:
 
         is_valid = artifact.verify_integrity()
         if not is_valid:
+            telemetry.increment_counter("artifact_integrity_failure_total", value=1.0)
             logger.error("Artifact integrity hash mismatch", artifact_id=artifact_id)
             raise ArtifactIntegrityError(f"Artifact '{artifact_id}' failed SHA-256 integrity verification.")
 
+        telemetry.increment_counter(
+            "artifact_integrity_verified_total",
+            value=1.0,
+            labels={"status": "valid"},
+        )
         return artifact, is_valid
 
     async def list_artifacts(self, execution_id: str) -> List[Artifact]:
