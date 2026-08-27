@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional, Set
 import structlog
 
 from ..core.config import settings
+from ..core.telemetry import telemetry
 from ..domain.interfaces.model_provider import ModelProvider
 from ..domain.interfaces.evaluation_provider import EvaluationProvider
 from ..persistence.database import async_session_factory
@@ -102,6 +103,7 @@ class BackgroundExecutionManager:
         Preserves correlation ID, agent registry overrides, and evaluation providers.
         """
         if self._shutdown_event.is_set():
+            telemetry.increment_counter("background_dispatch_failures_total")
             logger.warning("Rejecting execution schedule during shutdown", execution_id=execution_id)
             return None
 
@@ -122,6 +124,8 @@ class BackgroundExecutionManager:
         )
         self._active_tasks.add(task)
         self._running_execution_ids.add(execution_id)
+        telemetry.increment_counter("background_dispatch_total")
+        telemetry.set_gauge("background_active_executions", float(len(self._active_tasks)))
 
         task.add_done_callback(lambda t: self._cleanup_task(t, execution_id))
         return task
@@ -129,6 +133,7 @@ class BackgroundExecutionManager:
     def _cleanup_task(self, task: asyncio.Task, execution_id: str) -> None:
         self._active_tasks.discard(task)
         self._running_execution_ids.discard(execution_id)
+        telemetry.set_gauge("background_active_executions", float(len(self._active_tasks)))
         if not task.cancelled() and task.exception():
             logger.error(
                 "Background workflow execution task failed with unhandled exception",
@@ -205,8 +210,12 @@ class BackgroundExecutionManager:
                     evaluator=evaluator,
                 )
 
+                telemetry.increment_counter("background_watchdog_sweeps_total")
+
                 # 1. Recover stale tasks with expired leases
                 stale_reclaimed = await engine.recover_stale_tasks()
+                if stale_reclaimed > 0:
+                    telemetry.increment_counter("background_tasks_recovered_total", value=float(stale_reclaimed))
 
                 # 2. Check for active/stranded workflows that need execution driving
                 active_execution_ids = await execution_repo.get_active_workflow_execution_ids()
@@ -266,20 +275,33 @@ class BackgroundExecutionManager:
     async def graceful_shutdown(self, timeout_seconds: float = 5.0) -> None:
         """Initiates graceful shutdown: stops watchdog, awaits in-flight executions up to timeout."""
         logger.info("Initiating background execution manager graceful shutdown", active_tasks=len(self._active_tasks))
+        telemetry.increment_counter("background_shutdowns_total")
         self._shutdown_event.set()
         await self.stop_watchdog()
 
-        if self._active_tasks:
+        try:
+            current_loop = asyncio.get_running_loop()
+            active_in_loop = {
+                t for t in self._active_tasks
+                if not t.done() and getattr(t, "get_loop", lambda: current_loop)() == current_loop
+            }
+        except RuntimeError:
+            active_in_loop = set()
+
+        if active_in_loop:
             # Wait for active tasks to conclude within timeout
             done, pending = await asyncio.wait(
-                self._active_tasks,
+                active_in_loop,
                 timeout=timeout_seconds,
                 return_when=asyncio.ALL_COMPLETED,
             )
             if pending:
                 logger.warning(
                     "Canceling remaining in-flight background execution tasks after shutdown timeout",
-                    remaining_count=len(pending),
+                    count=len(pending),
                 )
                 for task in pending:
                     task.cancel()
+        self._active_tasks.clear()
+        self._running_execution_ids.clear()
+        telemetry.set_gauge("background_active_executions", 0.0)
