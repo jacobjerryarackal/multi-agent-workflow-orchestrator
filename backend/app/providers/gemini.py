@@ -1,8 +1,7 @@
-"""Google Gemini ModelProvider implementation adhering to the domain ModelProvider protocol."""
-
 import json
 import time
 from typing import Any, Optional, Tuple, Type
+import structlog
 from pydantic import BaseModel, ValidationError
 
 try:
@@ -18,9 +17,12 @@ except ImportError:
 
 from ..core.config import settings
 from ..core.exceptions import OrchestratorException, SchemaValidationError
+from ..core.telemetry import telemetry
 from ..domain.interfaces.model_provider import ModelProvider
 from ..domain.models.agent import TokenUsageMetrics
 from ..domain.models.failure import FailureCategory
+
+logger = structlog.get_logger(__name__)
 
 
 class GeminiProviderError(OrchestratorException):
@@ -77,6 +79,10 @@ class GeminiModelProvider(ModelProvider):
         client = self._ensure_client()
         assert types is not None
 
+        labels = {"provider": "gemini", "model": self.default_model}
+        telemetry.increment_counter("model_requests_total", value=1.0, labels=labels)
+        start_time = time.perf_counter()
+
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=temperature,
@@ -91,20 +97,73 @@ class GeminiModelProvider(ModelProvider):
                 config=config,
             )
         except APIError as exc:
+            duration = time.perf_counter() - start_time
+            telemetry.observe_histogram("model_request_duration_seconds", value=duration, labels=labels)
             code = getattr(exc, "code", 500)
             if code == 429:
                 category = FailureCategory.INFRASTRUCTURE_PROVIDER_FAILURE
+                telemetry.increment_counter(
+                    "model_request_failures_total",
+                    value=1.0,
+                    labels={**labels, "error_category": category.value},
+                )
                 raise GeminiProviderError(f"Gemini rate limit exceeded: {exc}", category=category) from exc
             elif code in (500, 503):
                 category = FailureCategory.INFRASTRUCTURE_PROVIDER_FAILURE
+                telemetry.increment_counter(
+                    "model_request_failures_total",
+                    value=1.0,
+                    labels={**labels, "error_category": category.value},
+                )
                 raise GeminiProviderError(f"Gemini service unavailable ({code}): {exc}", category=category) from exc
             else:
+                category = FailureCategory.INFRASTRUCTURE_PROVIDER_FAILURE
+                telemetry.increment_counter(
+                    "model_request_failures_total",
+                    value=1.0,
+                    labels={**labels, "error_category": category.value},
+                )
                 raise GeminiProviderError(f"Gemini API error ({code}): {exc}") from exc
         except Exception as exc:
+            duration = time.perf_counter() - start_time
+            telemetry.observe_histogram("model_request_duration_seconds", value=duration, labels=labels)
+            telemetry.increment_counter(
+                "model_request_failures_total",
+                value=1.0,
+                labels={**labels, "error_category": "unexpected_error"},
+            )
             raise GeminiProviderError(f"Unexpected model execution failure: {exc}") from exc
+
+        duration = time.perf_counter() - start_time
+        telemetry.observe_histogram("model_request_duration_seconds", value=duration, labels=labels)
 
         # Extract usage metrics
         token_metrics = self._extract_token_usage(response)
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.prompt_tokens),
+            labels={**labels, "token_type": "prompt"},
+        )
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.completion_tokens),
+            labels={**labels, "token_type": "completion"},
+        )
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.total_tokens),
+            labels={**labels, "token_type": "total"},
+        )
+
+        logger.info(
+            "Model structured generation completed",
+            provider="gemini",
+            model=self.default_model,
+            duration_ms=round(duration * 1000, 2),
+            prompt_tokens=token_metrics.prompt_tokens,
+            completion_tokens=token_metrics.completion_tokens,
+            total_tokens=token_metrics.total_tokens,
+        )
 
         raw_text = response.text or ""
         if not raw_text.strip():
@@ -134,6 +193,11 @@ class GeminiModelProvider(ModelProvider):
         """
         client = self._ensure_client()
         assert types is not None
+
+        labels = {"provider": "gemini", "model": self.default_model}
+        telemetry.increment_counter("model_requests_total", value=1.0, labels=labels)
+        start_time = time.perf_counter()
+
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=temperature,
@@ -146,9 +210,35 @@ class GeminiModelProvider(ModelProvider):
                 config=config,
             )
         except Exception as exc:
+            duration = time.perf_counter() - start_time
+            telemetry.observe_histogram("model_request_duration_seconds", value=duration, labels=labels)
+            telemetry.increment_counter(
+                "model_request_failures_total",
+                value=1.0,
+                labels={**labels, "error_category": "text_generation_error"},
+            )
             raise GeminiProviderError(f"Gemini text generation failed: {exc}") from exc
 
+        duration = time.perf_counter() - start_time
+        telemetry.observe_histogram("model_request_duration_seconds", value=duration, labels=labels)
+
         token_metrics = self._extract_token_usage(response)
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.prompt_tokens),
+            labels={**labels, "token_type": "prompt"},
+        )
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.completion_tokens),
+            labels={**labels, "token_type": "completion"},
+        )
+        telemetry.increment_counter(
+            "model_tokens_total",
+            value=float(token_metrics.total_tokens),
+            labels={**labels, "token_type": "total"},
+        )
+
         return response.text or "", token_metrics
 
     def _extract_token_usage(self, response: Any) -> TokenUsageMetrics:
