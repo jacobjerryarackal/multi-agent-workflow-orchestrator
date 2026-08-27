@@ -19,8 +19,11 @@ class Settings(BaseSettings):
 
     # Database Configuration (PostgreSQL)
     DATABASE_URL: str = "postgresql+asyncpg://postgres:12345678@localhost:5432/orchestrator_test_db"
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 20
+    DATABASE_POOL_SIZE: int = 5
+    DATABASE_MAX_OVERFLOW: int = 5
+    DATABASE_POOL_TIMEOUT: int = 30
+    DATABASE_POOL_RECYCLE: int = 1800
+    DATABASE_POOL_PRE_PING: bool = True
 
     # Google Gemini API Provider
     GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key")
