@@ -18,9 +18,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from app settings or environment
+# Set database URL dynamically from app settings or environment (normalized to asyncpg)
 import os
-db_url = os.environ.get("DATABASE_URL") or settings.DATABASE_URL
+from app.core.config import normalize_database_url
+
+raw_url = os.environ.get("DATABASE_URL") or settings.DATABASE_URL
+db_url = normalize_database_url(raw_url)
 config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
