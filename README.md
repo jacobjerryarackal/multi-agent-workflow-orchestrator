@@ -1,19 +1,34 @@
 # Multi-Agent Workflow Orchestrator
 
-[![Tests: 152/152 Passing](https://img.shields.io/badge/tests-152%2F152%20passing-brightgreen.svg)]()
+[![Tests: 154/154 Passing](https://img.shields.io/badge/tests-154%2F154%20passing-brightgreen.svg)]()
 [![Type Check: Pyright Clean](https://img.shields.io/badge/pyright-0%20errors-brightgreen.svg)]()
 [![Backend: FastAPI + Python 3.11+](https://img.shields.io/badge/backend-FastAPI%20%7C%20Python%203.11%2B-blue.svg)]()
-[![Database: PostgreSQL 16 ACID + JSONB](https://img.shields.io/badge/database-PostgreSQL%2016%20%7C%20SQLAlchemy%20Async-navy.svg)]()
+[![Database: PostgreSQL 16 ACID + JSONB](https://img.shields.io/badge/database-Neon%20PostgreSQL%2016%20%7C%20asyncpg-navy.svg)]()
 [![Frontend: Next.js 14 + TypeScript](https://img.shields.io/badge/frontend-Next.js%2014%20%7C%20TypeScript%20%7C%20Tailwind-black.svg)]()
-[![Deployment: Render + Vercel Ready](https://img.shields.io/badge/deployment-Render%20%7C%20Vercel%20Ready-purple.svg)]()
+[![Deployment: Render + Vercel Deployed](https://img.shields.io/badge/deployment-Render%20%7C%20Vercel%20Live-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)]()
 
 > A production-oriented workflow runtime for executing, evaluating, observing, and recovering multi-agent AI workflows represented as deterministic Directed Acyclic Graphs (DAGs).
 
 ---
 
+## Production Deployment
+
+The Multi-Agent Workflow Orchestrator is deployed and verified in cloud production:
+
+- **Live Application (Frontend):** [https://multi-agent-workflow-orchestrator.vercel.app](https://multi-agent-workflow-orchestrator.vercel.app)
+- **Backend API Service:** [https://multi-agent-workflow-orchestrator.onrender.com](https://multi-agent-workflow-orchestrator.onrender.com)
+- **Backend API Root:** [https://multi-agent-workflow-orchestrator.onrender.com/](https://multi-agent-workflow-orchestrator.onrender.com/)
+- **Interactive API Documentation (Swagger):** [https://multi-agent-workflow-orchestrator.onrender.com/docs](https://multi-agent-workflow-orchestrator.onrender.com/docs)
+- **System Health & Component Status:** [https://multi-agent-workflow-orchestrator.onrender.com/api/v1/health](https://multi-agent-workflow-orchestrator.onrender.com/api/v1/health)
+- **Prometheus Metrics (OpenMetrics):** [https://multi-agent-workflow-orchestrator.onrender.com/api/v1/metrics](https://multi-agent-workflow-orchestrator.onrender.com/api/v1/metrics)
+- **Structured Telemetry Snapshot:** [https://multi-agent-workflow-orchestrator.onrender.com/api/v1/telemetry](https://multi-agent-workflow-orchestrator.onrender.com/api/v1/telemetry)
+
+---
+
 ## Table of Contents
 
+- [Production Deployment](#production-deployment)
 - [1. The Problem](#1-the-problem)
 - [2. What This Project Solves](#2-what-this-project-solves)
 - [3. The Core Idea: An AI Model Call Is Not a Workflow](#3-the-core-idea-an-ai-model-call-is-not-a-workflow)
@@ -32,13 +47,13 @@
 - [16. Observability, Telemetry & Audit Trails](#16-observability-telemetry--audit-trails)
 - [17. Security Architecture & Threat Model](#17-security-architecture--threat-model)
 - [18. REST API Reference](#18-rest-api-reference)
-- [19. Deployment Architecture (Render + Vercel)](#19-deployment-architecture-render--vercel)
+- [19. Deployment Architecture (Render + Vercel + Neon)](#19-deployment-architecture-render--vercel--neon)
 - [20. Technology Choices & Architectural Trade-offs](#20-technology-choices--architectural-trade-offs)
 - [21. Inspiration & Engineering Influences](#21-inspiration--engineering-influences)
 - [22. Real Engineering Challenges Encountered](#22-real-engineering-challenges-encountered)
 - [23. Testing & Verification Suite](#23-testing--verification-suite)
 - [24. Project Evolution Across Phases](#24-project-evolution-across-phases)
-- [25. Current Production Readiness Matrix](#25-current-production-readiness-matrix)
+- [25. Current Production Verification Matrix](#25-current-production-verification-matrix)
 - [26. Quick Start & Developer Guide](#26-quick-start--developer-guide)
 
 ---
@@ -795,9 +810,9 @@ PostgreSQL 16     Gemini API     Evaluators / Adapters
 
 ---
 
-## 19. Deployment Architecture (Render + Vercel)
+## 19. Deployment Architecture (Render + Vercel + Neon)
 
-The system is configured for cloud deployment across **Render** (Backend & Database) and **Vercel** (Frontend Control Plane).
+The system is deployed in cloud production across **Vercel** (Frontend Control Plane), **Render** (FastAPI Orchestrator API & Async Worker), and **Neon** (Serverless PostgreSQL 16).
 
 ```
 ┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
@@ -808,22 +823,36 @@ The system is configured for cloud deployment across **Render** (Backend & Datab
 │  │   • Static/Dynamic SSR         │  │     │  │   • Non-root User (appuser)    │  │
 │  │   • API Rewrite Proxy (/api/*) ├──┼─────┼─▶│   • Background Watchdog Loop   │  │
 │  └────────────────────────────────┘  │     │  └───────────────┬────────────────┘  │
-│                                      │     │                  │ Private Network   │
-│                                      │     │                  ▼                   │
-│                                      │     │  ┌────────────────────────────────┐  │
-│                                      │     │  │   Managed PostgreSQL 16 DB     │  │
-│                                      │     │  │   • ACID Relational Tables     │  │
-│                                      │     │  │   • Auto-migrations on Deploy  │  │
-│                                      │     │  └────────────────────────────────┘  │
-└──────────────────────────────────────┘     └──────────────────────────────────────┘
+└──────────────────────────────────────┘     │                  │ Encrypted TLS/SSL │
+                                             │                  ▼                   │
+                                             │  ┌────────────────────────────────┐  │
+                                             │  │      NEON POSTGRESQL 16        │  │
+                                             │  │   • Serverless Async Database  │  │
+                                             │  │   • asyncpg Connection Pool    │  │
+                                             │  │   • Alembic Auto-migrations    │  │
+                                             │  └────────────────────────────────┘  │
+                                             └──────────────────────────────────────┘
 ```
 
-### Pre-Deployment Migration Strategy
-`render.yaml` specifies an automated pre-deployment migration hook:
-```bash
-alembic -c backend/alembic.ini upgrade head
+### Production End-to-End Pipeline
 ```
-If database migrations fail, Render immediately halts the release, preventing broken container builds from receiving live traffic.
+[Browser Client]
+       │
+       │ HTTPS (Same-Origin: /api/v1/...)
+       ▼
+[Vercel / Next.js 14 Frontend]
+       │
+       │ Server-Side Rewrite Proxy (BACKEND_API_URL)
+       ▼
+[Render / FastAPI Backend Service]
+       │
+       ├───────────────────────────────┐
+       ▼                               ▼
+[Neon PostgreSQL 16]          [Google Gemini API]
+(asyncpg + TLS/SSL)           (gemini-2.5-flash)
+```
+
+---
 
 ### Same-Origin API Rewrite Proxy
 `frontend/next.config.mjs` proxies `/api/:path*` to the Render backend service:
@@ -832,12 +861,73 @@ async rewrites() {
   return [
     {
       source: "/api/:path*",
-      destination: `${process.env.BACKEND_API_URL}/api/:path*`,
+      destination: process.env.BACKEND_API_URL
+        ? `${process.env.BACKEND_API_URL}/api/:path*`
+        : "http://127.0.0.1:8000/api/:path*",
     },
   ];
 }
 ```
-This guarantees same-origin cookie security and eliminates client-side CORS complications.
+The browser communicates exclusively via same-origin relative paths (`/api/v1/...`). The Next.js serverless proxy forwards requests server-to-server to Render, eliminating browser CORS issues and protecting internal backend topology.
+
+---
+
+### Production Database (Neon PostgreSQL)
+Production persistence is backed by **Neon PostgreSQL 16**:
+* **Driver & Async Engine**: SQLAlchemy `AsyncEngine` paired with the asynchronous `asyncpg` driver (no synchronous `psycopg2` dependency).
+* **Connection Pooling**: Managed `AsyncAdaptedQueuePool` maintaining active async connections with pre-ping validation.
+* **Encrypted TLS/SSL**: All connections between Render and Neon are encrypted over TLS.
+* **Configuration**: Supplied via the `DATABASE_URL` environment variable on Render:
+  ```
+  postgresql://<user>:<password>@<neon-host>/<database>?sslmode=require
+  ```
+
+---
+
+### Database URL Normalization & asyncpg Compatibility
+SQLAlchemy's `asyncpg` dialect forwards URL query parameters directly into `asyncpg.connect(**kwargs)`. Standard `libpq` parameters (such as `sslmode` and `channel_binding`) cause `TypeError: connect() got an unexpected keyword argument 'sslmode'` when passed directly to `asyncpg`.
+
+The application implements automatic runtime URL normalization in `backend/app/core/config.py`:
+1. Normalizes `postgresql://` and `postgres://` schemes to `postgresql+asyncpg://`.
+2. Translates `sslmode=require` (or `verify-ca`/`verify-full`) to `ssl=require`.
+3. Strips unsupported direct libpq parameters (`channel_binding`, `gssencmode`) from the query string before passing arguments to `asyncpg`.
+
+---
+
+### Database Schema Migrations (Alembic)
+Schema versioning is managed via **Alembic** operating over the asynchronous `asyncpg` stack. The production database is migrated to `head` across 4 revisions:
+* `v001_initial_schema`: Core relational tables (`workflows`, `workflow_tasks`, `workflow_executions`, `task_executions`, `workflow_events`, `artifacts`).
+* `v002_evaluation_support`: Adds `revision_count` and JSONB `evaluation_history` columns for critique loops.
+* `v003_task_leases`: Adds `lease_until`, `heartbeat_at`, and `leased_by` columns with index for crash recovery.
+* `v004_idempotency_constraint`: Implements the PostgreSQL partial unique index `uq_workflow_executions_idempotency`.
+
+`render.yaml` executes migrations automatically during pre-deployment:
+```bash
+alembic -c backend/alembic.ini upgrade head
+```
+
+---
+
+### Environment Variables & Secret Boundary
+
+| Environment Variable | Hosting Platform | Target Component | Description |
+| :--- | :--- | :--- | :--- |
+| `BACKEND_API_URL` | **Vercel** | Next.js Proxy Rewrite | `https://multi-agent-workflow-orchestrator.onrender.com` |
+| `DATABASE_URL` | **Render** | Backend Persistence | Neon PostgreSQL connection URI (`postgresql://...`) |
+| `GEMINI_API_KEY` | **Render** | Model Provider | Google Gemini API key for agent inference |
+| `CORS_ORIGINS` | **Render** | Ingress Middleware | `https://multi-agent-workflow-orchestrator.vercel.app` |
+| `APP_ENV` | **Render** | Runtime Environment | `production` |
+| `DEBUG` | **Render** | Debug Flag | `false` |
+
+> [!IMPORTANT]
+> **Secret Boundary**: `DATABASE_URL` and `GEMINI_API_KEY` reside exclusively in the Render backend environment. They are never exposed to Vercel, the browser, or public client bundles.
+
+---
+
+### CORS Configuration
+Cross-Origin Resource Sharing is enforced by FastAPI's `CORSMiddleware`:
+* **Allowed Origin**: `https://multi-agent-workflow-orchestrator.vercel.app`
+* Configured on Render via `CORS_ORIGINS`.
 
 ---
 
@@ -901,7 +991,7 @@ This project completes the developer's four-pillar agentic systems portfolio:
 
 ## 23. Testing & Verification Suite
 
-The repository is validated with **152 automated tests** across unit, state machine, and integration layers.
+The repository is validated with **154 automated tests** across unit, state machine, and integration layers.
 
 ```bash
 # Run the complete test suite
@@ -915,10 +1005,10 @@ pytest tests -v
 * **Evaluators & Revision Loops**: 22 tests (Deterministic regex/JSON rules, Gemini LLM judge, reflection loops).
 * **Task Leases & Crash Recovery**: 20 tests (Atomic claim, lease expiration, supervisor watchdog recovery).
 * **Idempotency & Deduplication**: 14 tests (Partial unique index, duplicate request safety).
-* **API Endpoints & Integration**: 28 tests (Full REST API suite, SSE event streaming, security headers).
+* **API Endpoints & Database Integration**: 30 tests (Full REST API suite, database URL normalization, SSE event streaming, security headers).
 
 ```
-============================== 152 passed in 18.42s ==============================
+============================== 154 passed in 23.44s ==============================
 ```
 
 ---
@@ -926,11 +1016,11 @@ pytest tests -v
 ## 24. Project Evolution Across Phases
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Phase 1-2   │ ──▶ │  Phase 3-4   │ ──▶ │  Phase 5-6   │ ──▶ │  Phase 7-8   │
-│ Architecture │     │ Agents & LLM │     │ UI, Leases   │     │ Hardening &  │
-│  & State DB  │     │ Evaluators   │     │ & Idempotency│     │ Deployment   │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Phase 1-2   │ ──▶ │  Phase 3-4   │ ──▶ │  Phase 5-6   │ ──▶ │  Phase 7     │ ──▶ │  Phase 8     │
+│ Architecture │     │ Agents & LLM │     │ UI, Leases   │     │ Packaging &  │     │ Live Deploy  │
+│  & State DB  │     │ Evaluators   │     │ & Idempotency│     │ Verification │     │ & Smoke Test │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
 ```
 
 * **Phase 1 (Domain Foundations)**: Formalized domain models, DAG dependency resolver, and Kahn's algorithm.
@@ -939,23 +1029,42 @@ pytest tests -v
 * **Phase 4 (Evaluator Subsystem & HITL)**: Added deterministic/LLM evaluators, self-correction reflection loops, and approval gates.
 * **Phase 5 (Next.js 14 Control Plane)**: Built technical, high-density dashboard with live DAG visualization.
 * **Phase 6 (Durability & Crash Recovery)**: Implemented database task leases (`v003`), idempotency constraints (`v004`), and background watchdog.
-* **Phase 7 & 7.5 (Containerization & Deployment Ready)**: Built multi-stage `Dockerfile`, `render.yaml` blueprint, verified 152/152 tests.
-* **Phase 8 & 8.1 (Documentation & System Architecture)**: Produced award-winning, recruiter-friendly technical architecture documentation with 100% factual accuracy verification.
+* **Phase 7 & 7.5 (Containerization & Readiness)**: Built multi-stage `Dockerfile`, `render.yaml` blueprint, verified local and live API contracts.
+* **Phase 8 (Production Deployment & Verification)**: Deployed backend on Render, database on Neon PostgreSQL, and frontend on Vercel. Resolved asyncpg query parameter normalization and verified end-to-end cloud workflow execution.
 
 ---
 
-## 25. Current Production Readiness Matrix
+## 25. Current Production Verification Matrix
 
-| Verification Domain | Local Verification Status | Cloud Readiness Status | Evidence |
-| :--- | :--- | :--- | :--- |
-| **Backend Test Suite** | **VERIFIED** (152/152 Passed) | Ready | `pytest` passes with 100% success rate |
-| **Static Type Analysis** | **VERIFIED** (0 Errors) | Ready | `pyright` passing cleanly across all backend code |
-| **Frontend Production Build** | **VERIFIED** (9/9 Routes) | Ready | `next build` static/dynamic compilation clean |
-| **Relational Migrations** | **VERIFIED** (v001 - v004) | Ready | Automated `alembic upgrade head` preDeploy hook |
-| **Task Lease Engine** | **VERIFIED** (Atomic Claims) | Ready | Tested under concurrent multi-worker loads |
-| **Idempotency Engine** | **VERIFIED** (Unique Index) | Ready | Tested with duplicate parallel requests |
-| **Security & Secrets** | **VERIFIED** (Zero Leakage) | Ready | Secrets isolated to server-side env vars |
-| **Containerization** | **VERIFIED** (Non-root user) | Ready | Multi-stage Dockerfile with health checks |
+| Verification Domain | Production Status | Verified Evidence |
+| :--- | :--- | :--- |
+| **Render Backend Service** | **LIVE (HTTP 200)** | `GET /` returns API metadata and correlation ID |
+| **Database Connectivity** | **HEALTHY** | Neon PostgreSQL 16 active over `asyncpg` with TLS/SSL |
+| **Database Migrations** | **UP TO DATE (Head)** | `v001` through `v004` applied cleanly on Neon |
+| **Agent Registry** | **5/5 REGISTERED** | `planner`, `researcher`, `analyst`, `reviewer`, `synthesizer` |
+| **Model Provider** | **CONFIGURED** | Google Gemini `gemini-2.5-flash` with active API key |
+| **Background Watchdog** | **RUNNING** | Periodic 10s sweeps verified in `/api/v1/metrics` counters |
+| **Prometheus Metrics** | **OPERATIONAL** | OpenMetrics text stream exposed at `/api/v1/metrics` |
+| **Telemetry Snapshots** | **OPERATIONAL** | Structured JSON snapshots exposed at `/api/v1/telemetry` |
+| **Vercel Control Plane** | **LIVE** | Next.js 14 serverless proxy rewriting `/api/v1/...` to Render |
+| **Secret Boundary** | **SECURE** | Database credentials & Gemini keys isolated to Render backend |
+| **Automated Test Suite** | **154/154 PASSING** | 100% test pass rate with 0 Pyright type errors |
+
+---
+
+### Verified End-to-End Production Workflow Flow
+The cloud deployment was verified through a complete, live multi-agent workflow execution:
+
+1. **User Action**: Client triggers a workflow from the Vercel dashboard (`https://multi-agent-workflow-orchestrator.vercel.app`).
+2. **Same-Origin Ingress**: Browser issues `POST /api/v1/workflows/{id}/executions` to the Vercel edge.
+3. **Server-Side Proxy**: Next.js rewrites the request to Render (`https://multi-agent-workflow-orchestrator.onrender.com`).
+4. **DAG Submission & Validation**: FastAPI validates DAG topological constraints and idempotency key.
+5. **State Persistence**: Workflow record is committed to Neon PostgreSQL in state `QUEUED`.
+6. **Task Lease Claim**: Worker acquires an exclusive lease (`SELECT ... FOR UPDATE SKIP LOCKED`) and transitions task to `RUNNING`.
+7. **Model Inference**: `researcher_agent` executes structured prompt against Google Gemini (`gemini-2.5-flash`).
+8. **Artifact Generation**: Output is serialized to `research_findings.json` and verified with a cryptographic SHA-256 checksum.
+9. **State Finalization**: Task and workflow transition to `COMPLETED` and total duration is recorded.
+10. **Audit Log & Visual Update**: Chronological audit events (`WORKFLOW_STARTED`, `TASK_STARTED`, `ARTIFACT_PRODUCED`, `TASK_COMPLETED`, `WORKFLOW_COMPLETED`) are persisted and reflected on the control plane.
 
 ---
 
