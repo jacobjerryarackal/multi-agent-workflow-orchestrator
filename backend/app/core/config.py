@@ -1,5 +1,4 @@
-"""Application runtime settings and environment variable configuration."""
-
+import urllib.parse
 from typing import List, Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,22 +6,71 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 def normalize_database_url(url: str) -> str:
     """
-    Normalizes database connection URLs for SQLAlchemy AsyncEngine.
+    Normalizes database connection URLs for SQLAlchemy AsyncEngine and asyncpg.
     - Converts postgres:// or postgresql:// to postgresql+asyncpg://
     - Preserves postgresql+asyncpg:// and sqlite+aiosqlite://
     - Converts sqlite:// to sqlite+aiosqlite:// if not already async
+    - Translates libpq 'sslmode' query parameter to asyncpg 'ssl' parameter
+    - Strips unsupported libpq parameters (channel_binding, gssencmode) that cause asyncpg TypeError
     """
     if not url:
         return url
 
     url = url.strip()
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://"):]
-    elif url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url[len("postgresql://"):]
-    elif url.startswith("sqlite://") and not url.startswith("sqlite+aiosqlite://"):
+    
+    # Handle SQLite URLs
+    if url.startswith("sqlite+aiosqlite://"):
+        return url
+    if url.startswith("sqlite://"):
         return "sqlite+aiosqlite://" + url[len("sqlite://"):]
-    return url
+
+    # Handle PostgreSQL URLs
+    if url.startswith("postgres://"):
+        rest = url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        rest = url[len("postgresql://"):]
+    elif url.startswith("postgresql+asyncpg://"):
+        rest = url[len("postgresql+asyncpg://"):]
+    else:
+        return url
+
+    # Parse netloc, path, query
+    split_result = urllib.parse.urlsplit(f"postgresql+asyncpg://{rest}")
+    query_params = urllib.parse.parse_qsl(split_result.query, keep_blank_values=True)
+    
+    filtered_params = []
+    ssl_set = False
+    
+    for k, v in query_params:
+        if k == "sslmode":
+            if not ssl_set:
+                # Map libpq sslmode values to asyncpg ssl argument
+                if v in ("require", "verify-ca", "verify-full"):
+                    filtered_params.append(("ssl", "require"))
+                elif v in ("prefer", "allow", "disable"):
+                    filtered_params.append(("ssl", v))
+                else:
+                    filtered_params.append(("ssl", "require"))
+                ssl_set = True
+        elif k == "ssl":
+            if not ssl_set:
+                filtered_params.append((k, v))
+                ssl_set = True
+        elif k in ("channel_binding", "gssencmode"):
+            # libpq parameters unsupported as asyncpg keyword arguments
+            continue
+        else:
+            filtered_params.append((k, v))
+            
+    new_query = urllib.parse.urlencode(filtered_params)
+    normalized = urllib.parse.urlunsplit((
+        split_result.scheme,
+        split_result.netloc,
+        split_result.path,
+        new_query,
+        split_result.fragment,
+    ))
+    return normalized
 
 
 class Settings(BaseSettings):
