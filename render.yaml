@@ -28,9 +28,7 @@ services:
       - key: CORS_ORIGINS
         sync: false  # Set in Render Dashboard: e.g. https://your-frontend.vercel.app
       - key: DATABASE_URL
-        fromDatabase:
-          name: orchestrator-postgres
-          property: connectionString
+        sync: false  # Neon PostgreSQL connection string: set in Render Dashboard
       - key: DATABASE_POOL_SIZE
         value: "5"
       - key: DATABASE_MAX_OVERFLOW
@@ -55,11 +53,3 @@ services:
         value: "true"
       - key: RATE_LIMIT_PER_MINUTE
         value: "120"
-
-databases:
-  # Managed PostgreSQL Database (Free-Tier)
-  - name: orchestrator-postgres
-    plan: free
-    databaseName: orchestrator_db
-    user: orchestrator_user
-    ipAllowList: [] # Accessible from Render services within private network
