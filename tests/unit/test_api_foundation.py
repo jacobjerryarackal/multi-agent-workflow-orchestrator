@@ -380,3 +380,35 @@ def test_create_error_response_formats():
     r2 = create_error_response(status_code=400, code="ERR_2", message="Msg", details=["err1", "err2"])
     assert r2.status_code == 400
 
+
+def test_normalize_database_url():
+    """Verifies database URL normalization for asyncpg and aiosqlite."""
+    from app.core.config import normalize_database_url
+
+    # PostgreSQL normalization
+    assert normalize_database_url("postgresql://user:pass@ep-test.neon.tech/neondb?sslmode=require") == (
+        "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?sslmode=require"
+    )
+    assert normalize_database_url("postgres://user:pass@ep-test.neon.tech/neondb?sslmode=require") == (
+        "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?sslmode=require"
+    )
+    assert normalize_database_url("postgresql+asyncpg://user:pass@localhost:5432/db") == (
+        "postgresql+asyncpg://user:pass@localhost:5432/db"
+    )
+
+    # SQLite normalization
+    assert normalize_database_url("sqlite:///./test.db") == "sqlite+aiosqlite:///./test.db"
+    assert normalize_database_url("sqlite+aiosqlite:///./test.db") == "sqlite+aiosqlite:///./test.db"
+
+    # Empty string pass-through
+    assert normalize_database_url("") == ""
+
+
+def test_settings_database_url_validation():
+    """Verifies Settings model automatically normalizes DATABASE_URL on instantiation."""
+    from app.core.config import Settings
+
+    s = Settings(DATABASE_URL="postgresql://user:secret@ep-neon.tech/db?sslmode=require")
+    assert s.DATABASE_URL == "postgresql+asyncpg://user:secret@ep-neon.tech/db?sslmode=require"
+
+
