@@ -1,8 +1,28 @@
 """Application runtime settings and environment variable configuration."""
 
-from typing import List
-from pydantic import Field
+from typing import List, Any
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_database_url(url: str) -> str:
+    """
+    Normalizes database connection URLs for SQLAlchemy AsyncEngine.
+    - Converts postgres:// or postgresql:// to postgresql+asyncpg://
+    - Preserves postgresql+asyncpg:// and sqlite+aiosqlite://
+    - Converts sqlite:// to sqlite+aiosqlite:// if not already async
+    """
+    if not url:
+        return url
+
+    url = url.strip()
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://"):]
+    elif url.startswith("sqlite://") and not url.startswith("sqlite+aiosqlite://"):
+        return "sqlite+aiosqlite://" + url[len("sqlite://"):]
+    return url
 
 
 class Settings(BaseSettings):
@@ -49,6 +69,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def validate_database_url(cls, v: Any) -> str:
+        if isinstance(v, str):
+            return normalize_database_url(v)
+        return str(v)
 
     @property
     def cors_origins_list(self) -> List[str]:
