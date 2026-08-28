@@ -384,14 +384,28 @@ def test_create_error_response_formats():
 def test_normalize_database_url():
     """Verifies database URL normalization for asyncpg and aiosqlite."""
     from app.core.config import normalize_database_url
+    from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
+    from sqlalchemy.engine.url import make_url
 
-    # PostgreSQL normalization
-    assert normalize_database_url("postgresql://user:pass@ep-test.neon.tech/neondb?sslmode=require") == (
-        "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?sslmode=require"
+    # Neon URL with sslmode and channel_binding
+    neon_raw = "postgresql://user:pass@ep-test.neon.tech/neondb?sslmode=require&channel_binding=require"
+    normalized = normalize_database_url(neon_raw)
+    assert normalized == "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?ssl=require"
+
+    # Verify asyncpg dialect connect kwargs
+    d = PGDialect_asyncpg()
+    args, kwargs = d.create_connect_args(make_url(normalized))
+    assert kwargs.get("ssl") == "require"
+    assert "sslmode" not in kwargs
+    assert "channel_binding" not in kwargs
+    assert "gssencmode" not in kwargs
+
+    # postgres:// prefix
+    assert normalize_database_url("postgres://user:pass@ep-test.neon.tech/neondb?sslmode=verify-full&channel_binding=require&gssencmode=disable") == (
+        "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?ssl=require"
     )
-    assert normalize_database_url("postgres://user:pass@ep-test.neon.tech/neondb?sslmode=require") == (
-        "postgresql+asyncpg://user:pass@ep-test.neon.tech/neondb?sslmode=require"
-    )
+
+    # Already normalized URL
     assert normalize_database_url("postgresql+asyncpg://user:pass@localhost:5432/db") == (
         "postgresql+asyncpg://user:pass@localhost:5432/db"
     )
@@ -408,7 +422,7 @@ def test_settings_database_url_validation():
     """Verifies Settings model automatically normalizes DATABASE_URL on instantiation."""
     from app.core.config import Settings
 
-    s = Settings(DATABASE_URL="postgresql://user:secret@ep-neon.tech/db?sslmode=require")
-    assert s.DATABASE_URL == "postgresql+asyncpg://user:secret@ep-neon.tech/db?sslmode=require"
+    s = Settings(DATABASE_URL="postgresql://user:secret@ep-neon.tech/db?sslmode=require&channel_binding=require")
+    assert s.DATABASE_URL == "postgresql+asyncpg://user:secret@ep-neon.tech/db?ssl=require"
 
 
