@@ -8,52 +8,104 @@ A deterministic DAG workflow engine and failure recovery runtime built on Python
 
 ## 2. Architecture & State Flow
 
+### System Execution Architecture
+
 ```mermaid
 flowchart TD
+    subgraph Client["Client / API Layer"]
+        Req["API Request: POST /api/v1/workflows"] --> Submit["Workflow Service: submit_workflow()"]
+    end
+
     subgraph Supervisor["Supervisor (Execution Engine & Watchdog)"]
-        Submit[Submit Workflow DAG] --> TopoSort[Topological Sort / Kahn's Cycle Check]
-        TopoSort --> Sched[Identify READY Tasks]
-        Sched --> Claim[Atomic Lease Claim\n`SELECT FOR UPDATE` + `lease_until`]
-        Watchdog[Watchdog Sweeper Loop] -.->|Reclaim Expired Leases| Sched
+        Submit --> Topo["DAG Validation & Kahn's Topological Sort"]
+        Topo --> CheckReady{"Identify Tasks with<br/>Dependencies Satisfied"}
+        CheckReady --> Sched["Mark Eligible Tasks as READY"]
+        Sched --> Claim["Atomic Task Claim: SELECT FOR UPDATE<br/>Sets status=RUNNING, lease_until=now()+TTL"]
+        Watchdog["Background Watchdog Sweeper<br/>Scans lease_until &lt; NOW()"] -.->|Reclaim Stale Tasks| Sched
     end
 
-    subgraph Worker["Worker Execution & Handoff Validation"]
-        Claim --> InVal[Validate Input Contract\nPydantic model_validate]
-        InVal --> BuildPrompt[Build Scoped Prompt]
-        BuildPrompt --> LLM[Gemini Provider\n`generate_structured`]
-        LLM --> OutVal[Validate Output Contract\nPydantic model_validate]
-        OutVal --> HashCheck[Verify Artifact Integrity\nSHA-256 Checksum]
+    subgraph Worker["Worker Execution & Contract Validation"]
+        Claim --> InVal["Validate Input Schema<br/>Pydantic model_validate()"]
+        InVal --> BuildPrompt["Construct Scoped Prompt"]
+        BuildPrompt --> LLM["Model Provider: Gemini<br/>generate_structured()"]
+        LLM --> OutVal["Validate Output Schema<br/>Pydantic model_validate()"]
+        OutVal --> HashCheck["Verify Artifact Checksums<br/>hashlib.sha256()"]
     end
 
-    subgraph Evaluation["Evaluation & Fallback Subsystem"]
-        HashCheck --> EvalCheck{Evaluation Gate\nEnabled?}
-        EvalCheck -- No --> ApprCheck{Approval Gate\nRequired?}
-        EvalCheck -- Yes --> DetRules[Deterministic Rules Check\nSchema / Keys / Regex]
-        DetRules -- Pass --> LLMJudge[LLM-as-a-Judge Eval]
-        DetRules -- Fail --> RejPolicy
-        LLMJudge --> Verdict{Judge Verdict}
-        
+    subgraph Evaluation["Quality Evaluation & Bounded Revision"]
+        HashCheck --> EvalCheck{"Evaluation Gate<br/>Enabled?"}
+        EvalCheck -- No --> ApprCheck{"Approval Gate<br/>Required?"}
+        EvalCheck -- Yes --> DetRules["Deterministic Rules<br/>Schema / Regex / Key Checks"]
+        DetRules -- Pass --> LLMJudge["LLM-as-a-Judge Eval<br/>CompositeQualityEvaluator"]
+        DetRules -- Fail --> RejPolicy{"Rejection Policy<br/>Check"}
+        LLMJudge --> Verdict{"Evaluator Verdict"}
+
         Verdict -- PASS --> ApprCheck
-        Verdict -- REQUIRES_REVISION --> RevBudget{revision_count < max_revisions?}
-        RevBudget -- Yes --> Feedback[Inject RevisionContext\nReset status=READY]
-        Feedback --> Claim
-        RevBudget -- No --> RejPolicy{Rejection Policy}
+        Verdict -- REQUIRES_REVISION --> RevBudget{"revision_count &lt;<br/>max_revisions?"}
+        RevBudget -- Yes --> Feedback["Inject RevisionContext<br/>Transition to READY"]
+        Feedback --> Sched
+        RevBudget -- No --> RejPolicy
 
-        RejPolicy -- ESCALATE --> EscState[Set status=ESCALATED\nPause for Operator]
-        RejPolicy -- FAIL --> FailState[Set status=FAILED\nTrigger Retry or Abort]
+        RejPolicy -- ESCALATE --> EscState["Set status=ESCALATED<br/>Halt for Operator Action"]
+        RejPolicy -- FAIL --> FailState["Set status=FAILED<br/>Cascade to Downstream"]
 
-        ApprCheck -- Yes --> WaitApproval[Set status=WAITING_APPROVAL\nPause Execution]
-        ApprCheck -- No --> CompState[Set status=COMPLETED\nUnblock Downstream Tasks]
+        ApprCheck -- Yes --> WaitAppr["Set status=WAITING_APPROVAL<br/>Workflow Paused"]
+        ApprCheck -- No --> CompState["Set status=COMPLETED<br/>Unblock Downstream Tasks"]
     end
 
     subgraph Persistence["ACID State Store (PostgreSQL 16 / asyncpg)"]
-        Claim -.->|Acquire Row Lock| DB[(PostgreSQL)]
-        Feedback -.->|Append Audit Event & Update State| DB
-        CompState -.->|Emit TASK_COMPLETED & Save Artifacts| DB
+        Claim -.->|Acquire Row Lock & Lease| DB[("PostgreSQL")]
+        Feedback -.->|Append Event & Update Task| DB
+        CompState -.->|Persist Artifacts & Emit Event| DB
         EscState -.->|Emit Escalation Event| DB
         FailState -.->|Emit Failure Event| DB
-        Watchdog -.->|Scan `lease_until < NOW()`| DB
+        Watchdog -.->|Scan Expired Leases| DB
     end
+```
+
+### Task State Machine & Failure Recovery Lifecycle
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    [*] --> BLOCKED: Dependencies pending
+    [*] --> READY: Root task (no dependencies)
+
+    BLOCKED --> READY: All upstream dependencies COMPLETED
+    BLOCKED --> FAILED: Upstream dependency FAILED (Cascade failure)
+
+    READY --> RUNNING: Atomic lease acquired (SELECT FOR UPDATE)<br/>lease_until set, attempt_count incremented
+
+    state RUNNING {
+        direction TB
+        InputValidation --> ModelExecution: Valid Pydantic input
+        ModelExecution --> OutputValidation: Model returned structured JSON
+        OutputValidation --> ArtifactHashing: Output conforms to schema
+        ArtifactHashing --> EvaluationGate: SHA-256 verified
+    }
+
+    RUNNING --> READY: Transient error (attempt &lt; max_attempts)<br/>Backoff retry
+    RUNNING --> READY: Evaluation REQUIRES_REVISION<br/>(revision_count &lt; max_revisions, RevisionContext injected)
+    RUNNING --> WAITING_APPROVAL: Output passed, human gate required
+    RUNNING --> ESCALATED: Evaluation failed (policy=ESCALATE)<br/>or revision budget exhausted
+    RUNNING --> FAILED: Output or validation failure<br/>(retries exhausted or policy=FAIL)
+    RUNNING --> TIMED_OUT: Task duration exceeded timeout_seconds
+
+    RUNNING --> READY: Lease expired (attempt &lt; max_attempts)<br/>Watchdog sweep resets lease
+    RUNNING --> FAILED: Lease expired (attempt >= max_attempts)<br/>Watchdog sweep terminates task
+
+    WAITING_APPROVAL --> COMPLETED: Operator APPROVE
+    WAITING_APPROVAL --> ESCALATED: Operator REJECT
+    WAITING_APPROVAL --> TIMED_OUT: SLA deadline expired
+
+    ESCALATED --> READY: Operator manual retry
+    ESCALATED --> COMPLETED: Operator override approve
+    ESCALATED --> FAILED: Operator reject
+
+    COMPLETED --> [*]
+    FAILED --> [*]
+    TIMED_OUT --> [*]
 ```
 
 ---
