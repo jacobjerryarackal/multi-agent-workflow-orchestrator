@@ -12,101 +12,25 @@ A deterministic DAG workflow engine and failure recovery runtime built on Python
 
 ```mermaid
 flowchart TD
-    subgraph Client["Client / API Layer"]
-        Req["API Request: POST /api/v1/workflows"] --> Submit["Workflow Service: submit_workflow()"]
-    end
+    API["Workflow Submission<br/>(API Ingress & Idempotency Check)"] --> Spec["DAG Validation<br/>(Topological Sort & Cycle Detection)"]
+    Spec --> Sched["Dependency Resolver<br/>(Identifies READY Tasks)"]
+    
+    Sched --> Lease["Worker Dispatch & Lease Claim<br/>(Row Lock with Lease Expiry)"]
+    
+    Watchdog["Watchdog Sweeper<br/>(Reclaims Expired Leases)"] -.->|Reset Stale Tasks| Sched
 
-    subgraph Supervisor["Supervisor (Execution Engine & Watchdog)"]
-        Submit --> Topo["DAG Validation & Kahn's Topological Sort"]
-        Topo --> CheckReady{"Identify Tasks with<br/>Dependencies Satisfied"}
-        CheckReady --> Sched["Mark Eligible Tasks as READY"]
-        Sched --> Claim["Atomic Task Claim: SELECT FOR UPDATE<br/>Sets status=RUNNING, lease_until=now()+TTL"]
-        Watchdog["Background Watchdog Sweeper<br/>Scans lease_until &lt; NOW()"] -.->|Reclaim Stale Tasks| Sched
-    end
-
-    subgraph Worker["Worker Execution & Contract Validation"]
-        Claim --> InVal["Validate Input Schema<br/>Pydantic model_validate()"]
-        InVal --> BuildPrompt["Construct Scoped Prompt"]
-        BuildPrompt --> LLM["Model Provider: Gemini<br/>generate_structured()"]
-        LLM --> OutVal["Validate Output Schema<br/>Pydantic model_validate()"]
-        OutVal --> HashCheck["Verify Artifact Checksums<br/>hashlib.sha256()"]
-    end
-
-    subgraph Evaluation["Quality Evaluation & Bounded Revision"]
-        HashCheck --> EvalCheck{"Evaluation Gate<br/>Enabled?"}
-        EvalCheck -- No --> ApprCheck{"Approval Gate<br/>Required?"}
-        EvalCheck -- Yes --> DetRules["Deterministic Rules<br/>Schema / Regex / Key Checks"]
-        DetRules -- Pass --> LLMJudge["LLM-as-a-Judge Eval<br/>CompositeQualityEvaluator"]
-        DetRules -- Fail --> RejPolicy{"Rejection Policy<br/>Check"}
-        LLMJudge --> Verdict{"Evaluator Verdict"}
-
-        Verdict -- PASS --> ApprCheck
-        Verdict -- REQUIRES_REVISION --> RevBudget{"revision_count &lt;<br/>max_revisions?"}
-        RevBudget -- Yes --> Feedback["Inject RevisionContext<br/>Transition to READY"]
-        Feedback --> Sched
-        RevBudget -- No --> RejPolicy
-
-        RejPolicy -- ESCALATE --> EscState["Set status=ESCALATED<br/>Halt for Operator Action"]
-        RejPolicy -- FAIL --> FailState["Set status=FAILED<br/>Cascade to Downstream"]
-
-        ApprCheck -- Yes --> WaitAppr["Set status=WAITING_APPROVAL<br/>Workflow Paused"]
-        ApprCheck -- No --> CompState["Set status=COMPLETED<br/>Unblock Downstream Tasks"]
-    end
-
-    subgraph Persistence["ACID State Store (PostgreSQL 16 / asyncpg)"]
-        Claim -.->|Acquire Row Lock & Lease| DB[("PostgreSQL")]
-        Feedback -.->|Append Event & Update Task| DB
-        CompState -.->|Persist Artifacts & Emit Event| DB
-        EscState -.->|Emit Escalation Event| DB
-        FailState -.->|Emit Failure Event| DB
-        Watchdog -.->|Scan Expired Leases| DB
-    end
+    Lease --> Exec["Agent Execution<br/>(Pydantic Input & Output Contracts)"]
+    Exec --> Eval["Quality & Artifact Gate<br/>(SHA-256 Integrity + Evaluator)"]
+    
+    Eval -->|Verdict: Needs Changes| Revise{"Revision Budget<br/>Exceeded?"}
+    Revise -->|No| Sched
+    Revise -->|Yes| Halt["Terminal Rejection<br/>(Escalate to Human or Mark Failed)"]
+    
+    Eval -->|Verdict: Pass| Persist["State Persistence & DAG Fan-Out<br/>(Commit Outputs & Unblock Downstream)"]
+    Persist --> Complete(["Workflow Completion"])
 ```
 
-### Task State Machine & Failure Recovery Lifecycle
-
-```mermaid
-stateDiagram-v2
-    direction TB
-
-    [*] --> BLOCKED: Dependencies pending
-    [*] --> READY: Root task (no dependencies)
-
-    BLOCKED --> READY: All upstream dependencies COMPLETED
-    BLOCKED --> FAILED: Upstream dependency FAILED (Cascade failure)
-
-    READY --> RUNNING: Atomic lease acquired (SELECT FOR UPDATE)<br/>lease_until set, attempt_count incremented
-
-    state RUNNING {
-        direction TB
-        InputValidation --> ModelExecution: Valid Pydantic input
-        ModelExecution --> OutputValidation: Model returned structured JSON
-        OutputValidation --> ArtifactHashing: Output conforms to schema
-        ArtifactHashing --> EvaluationGate: SHA-256 verified
-    }
-
-    RUNNING --> READY: Transient error (attempt &lt; max_attempts)<br/>Backoff retry
-    RUNNING --> READY: Evaluation REQUIRES_REVISION<br/>(revision_count &lt; max_revisions, RevisionContext injected)
-    RUNNING --> WAITING_APPROVAL: Output passed, human gate required
-    RUNNING --> ESCALATED: Evaluation failed (policy=ESCALATE)<br/>or revision budget exhausted
-    RUNNING --> FAILED: Output or validation failure<br/>(retries exhausted or policy=FAIL)
-    RUNNING --> TIMED_OUT: Task duration exceeded timeout_seconds
-
-    RUNNING --> READY: Lease expired (attempt &lt; max_attempts)<br/>Watchdog sweep resets lease
-    RUNNING --> FAILED: Lease expired (attempt >= max_attempts)<br/>Watchdog sweep terminates task
-
-    WAITING_APPROVAL --> COMPLETED: Operator APPROVE
-    WAITING_APPROVAL --> ESCALATED: Operator REJECT
-    WAITING_APPROVAL --> TIMED_OUT: SLA deadline expired
-
-    ESCALATED --> READY: Operator manual retry
-    ESCALATED --> COMPLETED: Operator override approve
-    ESCALATED --> FAILED: Operator reject
-
-    COMPLETED --> [*]
-    FAILED --> [*]
-    TIMED_OUT --> [*]
-```
+Workflows enter through the FastAPI gateway, where specifications are parsed and checked for acyclic dependency graphs using Kahn's algorithm. The orchestrator unblocks tasks whose dependencies are satisfied and dispatches them to workers using database-backed leases (`SELECT ... FOR UPDATE` with lease timeouts) to prevent duplicate execution across distributed workers. Each agent runs in an isolated context, validating input payloads against strict Pydantic schemas before calling Gemini, and verifying emitted artifacts with SHA-256 checksums. Outputs undergo dual evaluation: deterministic rules check structural invariants, followed by an optional LLM-as-a-judge review. If an output falls short, structured critique is attached for a bounded revision loop. When the revision budget is exhausted, tasks fail or escalate to human operators. A background watchdog scans for expired leases left by crashed workers, resetting them for retry, while all state transitions, outputs, and telemetry are persisted transactionally to PostgreSQL.
 
 ---
 
